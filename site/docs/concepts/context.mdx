@@ -1,0 +1,108 @@
+---
+sidebar_position: 3
+title: Context propagation
+description: How trace_id, span_id, and W3C Baggage entries are injected into every LogRecord automatically — and how to opt out for fire-and-forget emits.
+slug: /concepts/context
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Context propagation
+
+The logger injects W3C Trace Context and W3C Baggage entries into every `LogRecord` automatically. Trace-to-log correlation works out of the box: when a backend joins records by `trace_id`, it sees every log line emitted inside the matching span.
+
+## What gets injected
+
+For every emit, the logger reads from the active OpenTelemetry context and fills:
+
+| Field | Source | Wire encoding |
+|---|---|---|
+| `trace_id` | OTel `Context` → `SpanContext.TraceId` | 16 bytes (lowercase 32-hex on JSON wire) |
+| `span_id` | OTel `Context` → `SpanContext.SpanId` | 8 bytes (lowercase 16-hex on JSON wire) |
+| `trace_flags` | OTel `Context` → `SpanContext.TraceFlags` | uint8 (sampled bit, etc.) |
+| `attributes["tenant.id"]` | W3C Baggage → `tenant.id` entry | inherited string |
+| `attributes["request.id"]` | W3C Baggage → `request.id` entry | inherited string |
+| `attributes["user.id"]` | W3C Baggage → `user.id` entry | inherited string |
+
+Other Baggage entries (the registry will live in `_meta/baggage_keys.yaml` in v1.1 — v1.0 bindings ship the key list inline) are also injected. If a record outside any active context emits, `trace_id` and `span_id` are left as `None` rather than zeros — backends distinguish "no trace" from "trace with all-zero ids".
+
+## How it works
+
+The Python binding uses the OTel Context API directly: `opentelemetry.context.get_current()` plus `opentelemetry.trace.get_current_span()`. The TypeScript binding uses `@opentelemetry/api`'s `trace.getActiveSpan()` plus `propagation.getActiveBaggage()`. The Go binding reads from the explicit `context.Context` argument passed to the `*Ctx` severity methods, calling `oteltrace.SpanFromContext(ctx)` from `go.opentelemetry.io/otel/trace`.
+
+Every binding consumes the same source — there is no parallel "dagstack context" abstraction. If you instrument your application with OTel spans (via `OpenTelemetry SDK` in Python, `@opentelemetry/sdk-node` in TS, `go.opentelemetry.io/otel` in Go), trace context propagation Just Works.
+
+## Setting baggage entries
+
+W3C Baggage is the OTel-standard way to propagate cross-cutting attributes across service boundaries. Setting `tenant.id` once at the request entry point makes every downstream log line carry the value, even across HTTP calls (when the OTel HTTP instrumentations are enabled).
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from opentelemetry import baggage, context
+
+    ctx = baggage.set_baggage("tenant.id", "acme-corp")
+    token = context.attach(ctx)
+    try:
+        logger.info("processing request")
+        # The emitted record carries attributes={"tenant.id": "acme-corp", ...}
+        # plus trace_id / span_id from the active span (if any).
+    finally:
+        context.detach(token)
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { context, propagation } from "@opentelemetry/api";
+
+    const baggage = propagation
+        .createBaggage()
+        .setEntry("tenant.id", { value: "acme-corp" });
+    const ctx = propagation.setBaggage(context.active(), baggage);
+
+    await context.with(ctx, async () => {
+        logger.info("processing request");
+        // The emitted record carries attributes={"tenant.id": "acme-corp", ...}
+        // plus trace_id / span_id from the active span (if any).
+    });
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    import (
+        "context"
+
+        "go.opentelemetry.io/otel/baggage"
+    )
+
+    member, _ := baggage.NewMember("tenant.id", "acme-corp")
+    bag, _ := baggage.New(member)
+    ctx := baggage.ContextWithBaggage(context.Background(), bag)
+
+    log.InfoCtx(ctx, "processing request", nil)
+    // The emitted record carries trace_id / span_id from the active span (if any).
+    // Note: Phase 1 Go binding reads trace context from ctx; baggage extraction
+    // is gated on a Phase 2 enable flag (see DefaultBaggageKeys).
+    ```
+  </TabItem>
+</Tabs>
+
+## Opting out
+
+For fire-and-forget emits that should not pull in caller context (rare — typically a metrics-style heartbeat or an audit record that must not leak the active tenant), the spec defines an opt-out:
+
+> `logger.withoutContext().info(...)` — returns a child logger that skips trace and baggage injection. The opt-out is not inherited further; children of the returned logger re-enable injection by default.
+
+The Python binding implements the opt-out as part of the `with_sinks` / scoped-override family in Phase 2. In Phase 1, the workaround is to bind explicit attributes only and accept that the active trace context will still be read; if your code path runs outside any span, no `trace_id` is injected.
+
+## What about explicit attributes named `trace_id`
+
+The spec reserves `trace_id`, `span_id`, `trace_flags` as **typed top-level fields** of `LogRecord`, not as attribute keys. If your application sets `attributes={"trace_id": "..."}` manually, the value lands in `attributes` (a separate slot) and does not override the field-level `trace_id`. Backends distinguish the two by structural location: the typed field is for OTel correlation; the attribute is application data.
+
+## See also
+
+- [LogRecord fields](../reference/log-record) — full structural layout.
+- [Operations and typed events](./operations) — how operation IDs combine with trace IDs.
+- [Wire formats](./wire-formats) — encoding of `trace_id` / `span_id` per format.
+- [ADR-0001 §3.4 (full normative text)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#34-context-propagation-mandatory).

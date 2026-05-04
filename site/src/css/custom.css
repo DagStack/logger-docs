@@ -1,0 +1,30 @@
+/**
+ * Global styles and overrides for Infima theme variables.
+ * The dagstack family palette uses indigo as the brand accent —
+ * shared across config-docs, logger-docs and other dagstack sub-sites.
+ */
+
+:root {
+  /* Primary — dagstack indigo (mirrors config-docs). */
+  --ifm-color-primary: #4A49DB;
+  --ifm-color-primary-dark: #3E38C9;
+  --ifm-color-primary-darker: #3530B5;
+  --ifm-color-primary-darkest: #282495;
+  --ifm-color-primary-light: #6261E1;
+  --ifm-color-primary-lighter: #7574E5;
+  --ifm-color-primary-lightest: #9696EB;
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(74, 73, 219, 0.08);
+}
+
+/* Lighter shades on a dark background, for readability. */
+[data-theme='dark'] {
+  --ifm-color-primary: #8988E9;
+  --ifm-color-primary-dark: #7574E5;
+  --ifm-color-primary-darker: #6261E1;
+  --ifm-color-primary-darkest: #4A49DB;
+  --ifm-color-primary-light: #9E9DEE;
+  --ifm-color-primary-lighter: #BFBEF4;
+  --ifm-color-primary-lightest: #D6D5F8;
+  --docusaurus-highlighted-code-line-bg: rgba(137, 136, 233, 0.12);
+}

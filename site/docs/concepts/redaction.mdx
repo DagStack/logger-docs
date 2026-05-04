@@ -1,0 +1,197 @@
+---
+sidebar_position: 5
+title: Redaction
+description: Suffix-based attribute masking — _key, _secret, _token, _password, _passphrase, _credentials. How the rule applies recursively to nested attributes.
+slug: /concepts/redaction
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Redaction
+
+The logger automatically masks attribute values whose keys match one of six suffix patterns. The mask is applied at emit time, before the record reaches any sink, so the raw secret value never crosses the logger API boundary in a flagged attribute.
+
+## The default suffix list
+
+By default, the logger redacts attributes whose key (case-insensitive) ends in:
+
+```
+_key
+_secret
+_token
+_password
+_passphrase
+_credentials
+```
+
+A matching key has its value replaced with the literal `"***"`. The suffix list lives in `config-spec/_meta/secret_patterns.yaml` and is shared between `dagstack/config` and `dagstack/logger` — adding a new pattern in one place updates both libraries on the next emitter run.
+
+## Behaviour
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import Logger
+
+    logger = Logger.get("auth")
+
+    logger.info("user authenticated", attributes={
+        "user.id": 42,
+        "api_key": "sk-very-secret-value",         # → "***"
+        "session_token": "ey...",                   # → "***"
+        "request.id": "req-abc",
+    })
+    # Emitted record:
+    # attributes = {
+    #   "user.id": 42,
+    #   "api_key": "***",
+    #   "session_token": "***",
+    #   "request.id": "req-abc",
+    # }
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { Logger } from "@dagstack/logger";
+
+    const logger = Logger.get("auth");
+
+    logger.info("user authenticated", {
+        "user.id": 42,
+        "api_key": "sk-very-secret-value",       // → "***"
+        "session_token": "ey...",                  // → "***"
+        "request.id": "req-abc",
+    });
+    // Emitted record:
+    // attributes = {
+    //   "user.id": 42,
+    //   "api_key": "***",
+    //   "session_token": "***",
+    //   "request.id": "req-abc",
+    // }
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    log := logger.Get("auth")
+
+    log.Info("user authenticated", logger.Attrs{
+        "user.id":       42,
+        "api_key":       "sk-very-secret-value", // → "***"
+        "session_token": "ey...",                // → "***"
+        "request.id":    "req-abc",
+    })
+    // Emitted record:
+    // attributes = {
+    //   "user.id": 42,
+    //   "api_key": "***",
+    //   "session_token": "***",
+    //   "request.id": "req-abc",
+    // }
+    ```
+  </TabItem>
+</Tabs>
+
+## Nested attributes
+
+Redaction applies **recursively** through nested maps. A secret nested inside a structured attribute is masked at any depth:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    logger.info("config snapshot", attributes={
+        "config": {
+            "service.name": "order-service",
+            "auth": {
+                "client_secret": "shh",         # → "***"
+                "redirect_url": "https://...",
+            },
+        },
+    })
+    # Result:
+    # attributes = {
+    #   "config": {
+    #     "service.name": "order-service",
+    #     "auth": {
+    #       "client_secret": "***",
+    #       "redirect_url": "https://...",
+    #     },
+    #   },
+    # }
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    logger.info("config snapshot", {
+        config: {
+            "service.name": "order-service",
+            auth: {
+                "client_secret": "shh",          // → "***"
+                "redirect_url": "https://...",
+            },
+        },
+    });
+    // Result:
+    // attributes = {
+    //   config: {
+    //     "service.name": "order-service",
+    //     auth: {
+    //       "client_secret": "***",
+    //       "redirect_url": "https://...",
+    //     },
+    //   },
+    // }
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    log.Info("config snapshot", logger.Attrs{
+        "config": map[string]any{
+            "service.name": "order-service",
+            "auth": map[string]any{
+                "client_secret": "shh",          // → "***"
+                "redirect_url":  "https://...",
+            },
+        },
+    })
+    // Result mirrors the Python / TS examples — recursion through nested
+    // map[string]any walks every key and masks matching suffixes.
+    ```
+  </TabItem>
+</Tabs>
+
+## What is **not** redacted
+
+- **`LogRecord.body`** — the primary message string. Redacting an arbitrary substring inside the body would require expensive pattern matching on plaintext, with high false-positive risk. Developers are expected to format the body without secrets; if you must include one, put it in a flagged attribute, not in the body.
+- **Attribute keys** — only values are masked, never keys. A key named `api_key` stays `api_key`; the value becomes `"***"`.
+- **OTel-typed fields** — `trace_id`, `span_id`, `instrumentation_scope`, `resource` are not subject to suffix matching; their meanings are fixed by spec.
+
+## Custom patterns
+
+Phase 1 ships the default suffix list only. Phase 2 introduces a `RedactionProcessor` in the LogProcessor chain (spec §10.3), allowing applications to add regex-based patterns:
+
+```yaml
+# Phase 2 — not yet active in v0.1.x
+processors:
+  - type: redaction
+    extra_patterns:
+      - pattern: "user\\.email"
+        replacement: "<redacted-email>"
+      - pattern: ".*_pii"
+        replacement: "***"
+```
+
+Until processors land, the workaround is to scrub the attribute before passing it to `logger.info(...)` — for example, by hashing or truncating the field in your application code.
+
+## Why suffix matching, not value scanning
+
+Scanning each value for "looks like a secret" patterns (high-entropy strings, regex-detected JWTs) is expensive and error-prone. Suffix-on-key is cheap, deterministic, and easy to audit — a reviewer reading your code can tell at a glance whether a field will be masked.
+
+The suffix discipline is also what makes the [config-spec secret-masking](https://config.dagstack.dev/docs/concepts/secrets) and the logger's redaction interoperate. The same pattern list `_key`, `_secret`, `_token`, `_password`, `_passphrase`, `_credentials` is honoured by both libraries.
+
+## See also
+
+- [LogRecord fields](../reference/log-record) — what fields exist and which can hold secrets.
+- [Custom sink](../guides/custom-sink) — how a sink implementer should treat already-redacted attribute values.
+- [ADR-0001 §10 (full normative text)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#10-redaction).

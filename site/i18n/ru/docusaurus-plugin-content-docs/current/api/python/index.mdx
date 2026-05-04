@@ -1,0 +1,188 @@
+---
+sidebar_position: 1
+title: Python API — обзор
+description: Справочник публичного API пакета dagstack-logger — Logger, configure, отправки по уровням, приёмники, локальные переопределения, dataclass LogRecord.
+slug: /api/python
+---
+
+# Python API — обзор
+
+Пакет `dagstack-logger` реализует контракт логгера для Python (3.11+). Phase 1 (опубликован как v0.1.x на PyPI) поставляет основное API плюс три приёмника; Phase 2 добавит OTLP-экспортёр и цепочку LogProcessor.
+
+## Публичные экспорты
+
+`__all__` пакета выставляет:
+
+| Символ | Вид | Модуль |
+|---|---|---|
+| `Logger` | класс | `dagstack.logger.logger` |
+| `LogRecord` | dataclass | `dagstack.logger.records` |
+| `Resource` | dataclass | `dagstack.logger.records` |
+| `InstrumentationScope` | dataclass | `dagstack.logger.records` |
+| `Severity` | `IntEnum` | `dagstack.logger.severity` |
+| `Sink` | `Protocol` | `dagstack.logger.sinks` |
+| `ConsoleSink` | класс | `dagstack.logger.sinks` |
+| `FileSink` | класс | `dagstack.logger.sinks` |
+| `InMemorySink` | класс | `dagstack.logger.sinks` |
+| `Subscription` | dataclass | `dagstack.logger.subscription` |
+| `configure` | функция | `dagstack.logger.configuration` |
+| `__version__` | str | `dagstack.logger._version` |
+
+Импортируй всё с верхнего уровня:
+
+```python
+from dagstack.logger import (
+    Logger,
+    LogRecord,
+    Resource,
+    InstrumentationScope,
+    Severity,
+    Sink,
+    ConsoleSink,
+    FileSink,
+    InMemorySink,
+    Subscription,
+    configure,
+)
+```
+
+## `configure(...)` — глобальный bootstrap
+
+```python
+def configure(
+    *,
+    root_level: str | int = "INFO",
+    sinks: list[Sink] | None = None,
+    per_logger_levels: dict[str, str | int] | None = None,
+    resource_attributes: dict[str, Value] | None = None,
+) -> None
+```
+
+Инициализирует глобальное состояние логгера. Задаёт нижнюю границу уровня root-логгера, прикрепляет приёмники, применяет переопределения по логгерам и засевает OTel `Resource` атрибутами уровня процесса. Вызывай один раз при старте приложения, до того как бизнес-код обратится к `Logger.get(name)`.
+
+Полный пошаговый пример смотри в руководстве [Настройка логгера](/docs/guides/configure).
+
+## `Logger` — реестр именованных логгеров
+
+```python
+class Logger:
+    @classmethod
+    def get(cls, name: str = "", version: str | None = None) -> Logger: ...
+
+    # Отправки по уровню
+    def trace(self, body: Value, *, attributes: Mapping[str, Value] | None = None) -> None: ...
+    def debug(self, body: Value, *, attributes: Mapping[str, Value] | None = None) -> None: ...
+    def info(self, body: Value, *, attributes: Mapping[str, Value] | None = None) -> None: ...
+    def warn(self, body: Value, *, attributes: Mapping[str, Value] | None = None) -> None: ...
+    def error(self, body: Value, *, attributes: Mapping[str, Value] | None = None) -> None: ...
+    def fatal(self, body: Value, *, attributes: Mapping[str, Value] | None = None) -> None: ...
+    def log(self, severity_number: int, body: Value, *, attributes: Mapping[str, Value] | None = None) -> None: ...
+    def exception(self, err: BaseException, *, body: Value | None = None, attributes: Mapping[str, Value] | None = None) -> None: ...
+
+    # Мутаторы конфигурации
+    def set_sinks(self, sinks: list[Sink]) -> None: ...
+    def set_min_severity(self, severity_number: int) -> None: ...
+    def set_resource(self, resource: Resource | None) -> None: ...
+
+    # Локальные переопределения
+    def with_sinks(self, sinks: list[Sink]) -> Logger: ...
+    def append_sinks(self, extra_sinks: list[Sink]) -> Logger: ...
+    def without_sinks(self) -> Logger: ...
+    def scope_sinks(self, sinks: list[Sink]) -> AbstractContextManager[Logger]: ...
+    def child(self, attributes: Mapping[str, Value]) -> Logger: ...
+
+    # Жизненный цикл
+    def flush(self, timeout: float = 5.0) -> None: ...
+    def close(self) -> None: ...
+
+    # Интроспекция
+    def effective_sinks(self) -> list[Sink]: ...
+    def effective_min_severity(self) -> int: ...
+    def effective_resource(self) -> Resource | None: ...
+
+    # Подписка (Phase 1 — неактивна)
+    def on_reconfigure(self, callback: Callable[[], None]) -> Subscription: ...
+```
+
+Конструируется только через `Logger.get(name, version)`; реестр кеширует один экземпляр на имя. Потомки, созданные `child(...)`, `with_sinks(...)`, `append_sinks(...)`, `without_sinks(...)`, отделены от реестра — они наследуют конфигурацию от родителя, но в глобальном реестре не участвуют.
+
+## `Severity` — константы групп
+
+```python
+class Severity(IntEnum):
+    TRACE = 1
+    DEBUG = 5
+    INFO = 9
+    WARN = 13
+    ERROR = 17
+    FATAL = 21
+```
+
+Шесть базовых значений групп. `int(Severity.INFO) == 9`. Полное перечисление 1–24 смотри в [справочной таблице уровней](/docs/reference/severity-table).
+
+## Приёмники
+
+Три конкретных приёмника плюс протокол `Sink`:
+
+```python
+class Sink(Protocol):
+    id: str
+    def emit(self, record: LogRecord) -> None: ...
+    def flush(self, timeout: float = 5.0) -> None: ...
+    def close(self) -> None: ...
+    def supports_severity(self, severity_number: int) -> bool: ...
+
+
+class ConsoleSink:
+    def __init__(self, *, mode: Literal["auto", "json", "pretty"] = "auto",
+                 stream: TextIO | None = None,
+                 min_severity: int = 1) -> None: ...
+
+
+class FileSink:
+    def __init__(self, path: str | Path, *,
+                 max_bytes: int = 0, keep: int = 0,
+                 min_severity: int = 1) -> None: ...
+
+
+class InMemorySink:
+    def __init__(self, *, capacity: int = 1000, min_severity: int = 1) -> None: ...
+    def records(self) -> list[LogRecord]: ...
+    def clear(self) -> None: ...
+    @property
+    def capacity(self) -> int: ...
+```
+
+Использование смотри в разделе [Приёмники](/docs/concepts/sinks); реализацию протокола — в [руководстве по созданию собственного приёмника](/docs/guides/custom-sink).
+
+## `LogRecord` — типизированный dataclass
+
+```python
+@dataclass(slots=True)
+class LogRecord:
+    time_unix_nano: int
+    severity_number: int
+    severity_text: str
+    body: Value
+    attributes: dict[str, Value] = field(default_factory=dict)
+    instrumentation_scope: InstrumentationScope | None = None
+    resource: Resource | None = None
+    trace_id: bytes | None = None
+    span_id: bytes | None = None
+    trace_flags: int = 0
+    observed_time_unix_nano: int | None = None
+```
+
+По спеке §1 набор полей совпадает с OTel Log Data Model v1.24. Полную таблицу с семантикой и владением смотри в [Полях LogRecord](/docs/reference/log-record).
+
+## `Subscription` — в Phase 1 неактивна
+
+`Subscription` зеркалит dataclass `Subscription` из `config-spec` — `path`, `active`, `inactive_reason`. В Phase 1 логгер не подписывается на изменения конфигурации в рантайме; `Logger.on_reconfigure(callback)` возвращает неактивную подписку с `inactive_reason="Phase 1 logger does not support watch-based reconfigure"` и одноразово выводит предупреждение. Phase 2 активирует путь watch.
+
+## См. также
+
+- [Быстрый старт](/docs/intro) — кратчайший сквозной пример.
+- [Настройка логгера](/docs/guides/configure) — полная пошаговая инициализация.
+- [Захват логов в тестах](/docs/guides/testing) — паттерны `InMemorySink`.
+- [Реализация собственного приёмника](/docs/guides/custom-sink) — детали протокола.
+- [Исходники `dagstack-logger` на GitHub](https://github.com/dagstack/logger-python).

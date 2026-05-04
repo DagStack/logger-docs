@@ -1,0 +1,149 @@
+---
+sidebar_position: 4
+title: Операции и типизированные события
+description: Как длительные бизнес-операции помечаются через operation.name / operation.id и как типизированные события используют event.domain / event.name с валидацией по схеме.
+slug: /concepts/operations
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Операции и типизированные события
+
+Помимо OTel-формата передачи логгер публикует **набор семантических соглашений** — стандартные ключи атрибутов для распространённых паттернов. Два из них центральные: **операции** (стабильный идентификатор длительной единицы работы) и **типизированные события** (вариант, проверяемый по схеме, в качестве замены свободному `body`).
+
+## Операции
+
+Любая бизнес-операция, которая длится дольше одного такта (`index_repo`, `query_rag`, `load_plugin`, `process_order`, `embed_batch`), на каждой записи внутри границ операции несёт следующие атрибуты:
+
+| Атрибут | Тип | Значение |
+|---|---|---|
+| `operation.name` | string | Стабильный snake_case идентификатор — `process_order`, `index_repo`. Не меняется между релизами. |
+| `operation.id` | string | Уникальный UUID для экземпляра операции. По сути псевдоним `span_id`, но со стабильным именем (поиск в UI без знания о трассировке). |
+| `operation.kind` | enum | `indexing`, `query`, `lifecycle`, `hook`, `maintenance`, `admin`. Расширение запланировано через `_meta/conventions/operation_kinds.yaml` в v1.1; в биндингах v1.0 enum поставляется инлайн. |
+| `operation.parent.id` | string? | Родительская операция, когда есть иерархия (`query_rag` → `semantic_search` → `embed_batch`). |
+| `operation.status` | enum? | На событии `completed`: `ok`, `error`, `cancelled`, `timeout`. |
+| `operation.duration_ms` | int? | На событии `completed`: миллисекунды от начала до конца. |
+
+`operation.name` и `operation.id` **обязательны** в каждой записи внутри границ операции. Хелпер биндинга `logger.operation(name, kind)` — стандартная точка входа: он устанавливает активную операцию в контексте и автоматически добавляет атрибуты во все дочерние записи и span.
+
+:::caution Статус Phase 1
+Хелпер `logger.operation(...)` нормативен в спеке §5.1, но пока не вошёл ни в один биндинг v0.1.x (`dagstack-logger`, `@dagstack/logger`, `go.dagstack.dev/logger`). В Phase 1 атрибуты задаются вручную — через `child(attributes=...)` или передачей в каждый emit.
+:::
+
+Обходной путь, пока хелпер не появился:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    import uuid
+    from dagstack.logger import Logger
+
+    logger = Logger.get("order_service")
+
+    op_logger = logger.child(attributes={
+        "operation.name": "process_order",
+        "operation.id": str(uuid.uuid4()),
+        "operation.kind": "lifecycle",
+    })
+    op_logger.info("started", attributes={"order.id": 1234})
+    op_logger.info("completed", attributes={
+        "operation.status": "ok",
+        "operation.duration_ms": 142,
+    })
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { randomUUID } from "node:crypto";
+    import { Logger } from "@dagstack/logger";
+
+    const logger = Logger.get("order_service");
+
+    const opLogger = logger.child({
+        "operation.name": "process_order",
+        "operation.id": randomUUID(),
+        "operation.kind": "lifecycle",
+    });
+    opLogger.info("started", { "order.id": 1234 });
+    opLogger.info("completed", {
+        "operation.status": "ok",
+        "operation.duration_ms": 142,
+    });
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    import (
+        "github.com/google/uuid"
+
+        "go.dagstack.dev/logger"
+    )
+
+    log := logger.Get("order_service")
+
+    opLog := log.Child(logger.Attrs{
+        "operation.name": "process_order",
+        "operation.id":   uuid.NewString(),
+        "operation.kind": "lifecycle",
+    })
+    opLog.Info("started", logger.Attrs{"order.id": 1234})
+    opLog.Info("completed", logger.Attrs{
+        "operation.status":      "ok",
+        "operation.duration_ms": 142,
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+## Типизированные события
+
+Вместо свободного `body` соглашение — отправлять **типизированные события** с обязательными `event.domain` и `event.name`:
+
+```
+attributes: {
+  event.domain:         "rag",
+  event.name:           "chunk_retrieved",
+  event.schema_version: "1.0",
+  rag.chunk.id:         "abc123",
+  rag.chunk.score:      0.87,
+  rag.chunk.repo:       "order-service",
+}
+```
+
+Схемы будут жить в `_meta/events/<domain>.yaml` в spec-репозитории (v1.1) и эмитятся в константы для каждого языка (Python `Literal`, TS `as const`, Go `const`); в биндингах v1.0 списки атрибутов на каждый домен поставляются инлайн. Биндинг валидирует обязательные атрибуты на этапе emit; отсутствие обязательных ключей приводит к ошибке до того, как запись достигнет приёмника.
+
+:::caution Статус Phase 1
+Хелпер `logger.emit_event(domain, name, attrs)` нормативен в спеке §5.2, но пока не вошёл ни в один биндинг v0.1.x. В Phase 1 вызывающий код собирает `event.domain` / `event.name` и атрибуты домена вручную и вызывает `logger.info(...)` напрямую.
+:::
+
+## Зарезервированные домены
+
+Домены событий разделены на два уровня:
+
+- **Зарезервированные ядром** — биндинги отвергают отправки пользовательского кода в этих доменах: `dagstack.*`, `operation.*`, `progress.*`. Их семантика зафиксирована в основной спеке.
+- **Зарезервированные расширениями** — действуют только когда соответствующий extension pack загружен. Набор для AI-агентов (см. [Наблюдаемость AI-агентов](./ai-agents)) резервирует `gen_ai.*`, `ai_agent.*`, `rag.*`, `agent.*`, `prompt.*`, `mcp.*`.
+
+Пользовательские домены следуют нотации обратного DNS (`com.example.myapp.checkout`) во избежание коллизий между приложениями.
+
+## События прогресса
+
+Отчёт о прогрессе (10 000 проиндексированных файлов, пакет эмбеддингов, эпоха обучения) — это соглашение поверх LogRecord, а не отдельный API. Биндинг отправляет записи с `event.domain = "progress"` и одним из четырёх имён: `tick`, `started`, `completed`, `failed`.
+
+| Атрибут | Тип | Значение |
+|---|---|---|
+| `progress.current` | int | Завершённые единицы. |
+| `progress.total` | int? | Всего единиц, если известно; `null` для потоков с неизвестным итогом. |
+| `progress.unit` | string | `"files"`, `"chunks"`, `"tokens"`, `"bytes"`, `"items"`. |
+| `progress.phase` | string? | `"discovery"`, `"chunking"`, `"embedding"`, `"upserting"`. |
+| `progress.rate` | float? | Единиц в секунду (скользящее окно). |
+| `progress.eta_ms` | int? | Оценка миллисекунд до завершения, когда `total` известен. |
+| `operation.id` | string | Обязателен — прогресс всегда привязан к операции. |
+
+При высокой частоте тиков хелпер биндинга ограничивает их частоту (по умолчанию `min_interval_ms=500`); `started` / `completed` / `failed` отправляются всегда без отбрасывания.
+
+## См. также
+
+- [Наблюдаемость AI-агентов](./ai-agents) — расширение, построенное поверх операций и типизированных событий.
+- [Форматы передачи](./wire-formats) — как атрибуты `event.*` выглядят на wire.
+- [ADR-0001 §5 (полный нормативный текст)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#5-semantic-conventions).

@@ -1,0 +1,167 @@
+---
+sidebar_position: 1
+title: Severity
+description: The 1-24 severity number scale, six canonical severity_text strings, and the bucket mapping that backends rely on for exact-match filtering.
+slug: /concepts/severity
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Severity
+
+The logger uses **OpenTelemetry severity numbering** — an integer in the range `1..24` — for `severity_number`, and exactly **one of six canonical strings** for `severity_text`. The two fields together let backends filter on either numeric range or exact string equality.
+
+## Why two fields
+
+Numeric `severity_number` carries the granularity (e.g., `INFO2 = 10`, `INFO3 = 11`); the canonical `severity_text` carries the bucket (`"INFO"`). Backends like Grafana, Honeycomb, and Datadog filter by exact match on `severity_text`, so the bucket value must come from a fixed set; otherwise a query like `severity_text = "INFO"` would silently miss `"INFO2"` records. The numeric field stays available for `severity_number > 9 AND severity_number < 13` style queries.
+
+## The bucket table
+
+The 24 numeric values map to six canonical strings:
+
+| `severity_number` range | `severity_text` | Meaning |
+|---|---|---|
+| 1-4 | `"TRACE"` | Fine-grained diagnostic |
+| 5-8 | `"DEBUG"` | Debug-level diagnostic |
+| 9-12 | `"INFO"` | Informational (default `INFO = 9`) |
+| 13-16 | `"WARN"` | Warning conditions |
+| 17-20 | `"ERROR"` | Error requiring attention |
+| 21-24 | `"FATAL"` | Critical — application-level failure |
+
+The primary names are `trace`, `debug`, `info`, `warn`, `error`, `fatal` with `severity_number` values `1, 5, 9, 13, 17, 21` respectively. Intermediate numbers go through the generic `log(severity_number, ...)` method; their bucket follows the table above.
+
+## Calling the severity methods
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import Logger
+
+    logger = Logger.get("order_service.checkout")
+
+    logger.trace("entering function", attributes={"args.order_id": 1234})
+    logger.debug("cache miss", attributes={"cache.key": "user:42"})
+    logger.info("order placed", attributes={"order.id": 1234})
+    logger.warn("retry triggered", attributes={"retry.attempt": 2})
+    logger.error("payment declined", attributes={"order.id": 1234})
+    logger.fatal("config invariant violated", attributes={"reason": "missing service.name"})
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { Logger } from "@dagstack/logger";
+
+    const logger = Logger.get("order_service.checkout");
+
+    logger.trace("entering function", { "args.order_id": 1234 });
+    logger.debug("cache miss", { "cache.key": "user:42" });
+    logger.info("order placed", { "order.id": 1234 });
+    logger.warn("retry triggered", { "retry.attempt": 2 });
+    logger.error("payment declined", { "order.id": 1234 });
+    logger.fatal("config invariant violated", { reason: "missing service.name" });
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    log := logger.Get("order_service.checkout")
+
+    log.Trace("entering function", logger.Attrs{"args.order_id": 1234})
+    log.Debug("cache miss", logger.Attrs{"cache.key": "user:42"})
+    log.Info("order placed", logger.Attrs{"order.id": 1234})
+    log.Warn("retry triggered", logger.Attrs{"retry.attempt": 2})
+    log.Error("payment declined", logger.Attrs{"order.id": 1234})
+    log.Fatal("config invariant violated", logger.Attrs{"reason": "missing service.name"})
+
+    // Use the *Ctx variants when ctx carries an OTel span.
+    log.InfoCtx(ctx, "order placed", logger.Attrs{"order.id": 1234})
+    ```
+  </TabItem>
+</Tabs>
+
+For an intermediate value (`INFO2`, `DEBUG3`) use the generic `log` method with an explicit `severity_number`:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    logger.log(11, "intermediate level", attributes={"phase": "warmup"})
+    # severity_number=11 → severity_text="INFO" (still in 9-12 bucket).
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    logger.log(11, "intermediate level", { phase: "warmup" });
+    // severity_number=11 → severity_text="INFO" (still in 9-12 bucket).
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    log.LogCtx(ctx, 11, "intermediate level", logger.Attrs{"phase": "warmup"})
+    // severity_number=11 → severity_text="INFO" (still in 9-12 bucket).
+    ```
+  </TabItem>
+</Tabs>
+
+## The constants
+
+Each binding exposes the bucket boundaries as language-native constants:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import Severity
+
+    assert int(Severity.TRACE) == 1
+    assert int(Severity.DEBUG) == 5
+    assert int(Severity.INFO) == 9
+    assert int(Severity.WARN) == 13
+    assert int(Severity.ERROR) == 17
+    assert int(Severity.FATAL) == 21
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { Severity } from "@dagstack/logger";
+
+    // Severity is exported as a const-object — typed numeric constants.
+    Severity.TRACE; // 1
+    Severity.DEBUG; // 5
+    Severity.INFO;  // 9
+    Severity.WARN;  // 13
+    Severity.ERROR; // 17
+    Severity.FATAL; // 21
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    import "go.dagstack.dev/logger"
+
+    // Typed Severity int constants.
+    _ = logger.SeverityTrace // 1
+    _ = logger.SeverityDebug // 5
+    _ = logger.SeverityInfo  // 9
+    _ = logger.SeverityWarn  // 13
+    _ = logger.SeverityError // 17
+    _ = logger.SeverityFatal // 21
+    ```
+  </TabItem>
+</Tabs>
+
+Each binding emits the same six constants — values stay aligned with OTel numbering and never drift between languages. A planned `_meta/severity.yaml` (v1.1) will become the source of truth bindings vendor; v1.0 bindings ship the constants inline.
+
+## Mapping to other systems
+
+| Source | TRACE | DEBUG | INFO | WARN | ERROR | FATAL |
+|---|---|---|---|---|---|---|
+| OTel `severity_number` | 1-4 | 5-8 | 9-12 | 13-16 | 17-20 | 21-24 |
+| Python `logging` | — (no built-in) | 10 | 20 | 30 | 40 | 50 |
+| Go `slog` | — | -4 | 0 | 4 | 8 | — |
+| Syslog (RFC 5424) | 7 | 7 | 6 | 4 | 3 | 2/1/0 |
+
+The mapping table will live in `_meta/severity.yaml` in the spec repository (v1.1; v1.0 bindings ship the table inline). See the full table on the [Severity reference](../reference/severity-table) page.
+
+## See also
+
+- [LogRecord fields](../reference/log-record) — full field list with types.
+- [Severity reference table](../reference/severity-table) — full 24-row enumeration.
+- [ADR-0001 §2 (full normative text)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#2-severity-levels).

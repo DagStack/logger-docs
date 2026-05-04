@@ -1,0 +1,149 @@
+---
+sidebar_position: 4
+title: Operations and typed events
+description: How long-running business operations are tagged with operation.name / operation.id and how typed events use event.domain / event.name with schema validation.
+slug: /concepts/operations
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Operations and typed events
+
+Beyond the OTel wire format, the logger publishes a **set of semantic conventions** — standard attribute keys for common patterns. Two of them are central: **operations** (a stable identifier for a long-running unit of work) and **typed events** (a schema-validated alternative to free-form messages).
+
+## Operations
+
+Any business-logic operation that runs longer than a single tick (`index_repo`, `query_rag`, `load_plugin`, `process_order`, `embed_batch`) carries the following attributes on every record emitted within the operation boundary:
+
+| Attribute | Type | Meaning |
+|---|---|---|
+| `operation.name` | string | A stable, snake_case identifier — `process_order`, `index_repo`. Does not change between deployments. |
+| `operation.id` | string | A unique UUID for the operation instance. Effectively an alias of `span_id`, but with a stable name (UI lookup without knowing about tracing). |
+| `operation.kind` | enum | `indexing`, `query`, `lifecycle`, `hook`, `maintenance`, `admin`. Extension is planned via `_meta/conventions/operation_kinds.yaml` in v1.1; v1.0 bindings ship the enum inline. |
+| `operation.parent.id` | string? | Parent operation when there is a hierarchy (`query_rag` → `semantic_search` → `embed_batch`). |
+| `operation.status` | enum? | On a `completed` event: `ok`, `error`, `cancelled`, `timeout`. |
+| `operation.duration_ms` | int? | On a `completed` event: milliseconds from start to end. |
+
+`operation.name` and `operation.id` are **mandatory** in every record emitted within an operation boundary. The binding's helper `logger.operation(name, kind)` is the conventional entry point — it sets the active operation in context and auto-injects the attributes into all child records and spans.
+
+:::caution Phase 1 status
+The `logger.operation(...)` helper is normative in spec §5.1, but it has not yet shipped in any v0.1.x binding (`dagstack-logger`, `@dagstack/logger`, `go.dagstack.dev/logger`). Phase 1 callers must currently set the attributes manually via `child(attributes=...)` or pass them to each emit.
+:::
+
+The manual workaround until the helper lands:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    import uuid
+    from dagstack.logger import Logger
+
+    logger = Logger.get("order_service")
+
+    op_logger = logger.child(attributes={
+        "operation.name": "process_order",
+        "operation.id": str(uuid.uuid4()),
+        "operation.kind": "lifecycle",
+    })
+    op_logger.info("started", attributes={"order.id": 1234})
+    op_logger.info("completed", attributes={
+        "operation.status": "ok",
+        "operation.duration_ms": 142,
+    })
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { randomUUID } from "node:crypto";
+    import { Logger } from "@dagstack/logger";
+
+    const logger = Logger.get("order_service");
+
+    const opLogger = logger.child({
+        "operation.name": "process_order",
+        "operation.id": randomUUID(),
+        "operation.kind": "lifecycle",
+    });
+    opLogger.info("started", { "order.id": 1234 });
+    opLogger.info("completed", {
+        "operation.status": "ok",
+        "operation.duration_ms": 142,
+    });
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    import (
+        "github.com/google/uuid"
+
+        "go.dagstack.dev/logger"
+    )
+
+    log := logger.Get("order_service")
+
+    opLog := log.Child(logger.Attrs{
+        "operation.name": "process_order",
+        "operation.id":   uuid.NewString(),
+        "operation.kind": "lifecycle",
+    })
+    opLog.Info("started", logger.Attrs{"order.id": 1234})
+    opLog.Info("completed", logger.Attrs{
+        "operation.status":      "ok",
+        "operation.duration_ms": 142,
+    })
+    ```
+  </TabItem>
+</Tabs>
+
+## Typed events
+
+Instead of free-form `body` strings, the convention is to emit **typed events** with required `event.domain` and `event.name`:
+
+```
+attributes: {
+  event.domain:         "rag",
+  event.name:           "chunk_retrieved",
+  event.schema_version: "1.0",
+  rag.chunk.id:         "abc123",
+  rag.chunk.score:      0.87,
+  rag.chunk.repo:       "order-service",
+}
+```
+
+Schemas will live in `_meta/events/<domain>.yaml` in the spec repository (v1.1) and will be emitted into per-language constants (Python `Literal`, TS `as const`, Go `const`); v1.0 bindings ship the per-domain attribute lists inline. A binding validates required attributes at emit time; missing required keys raise an error before the record reaches a sink.
+
+:::caution Phase 1 status
+The `logger.emit_event(domain, name, attrs)` helper is normative in spec §5.2, but it has not yet shipped in any v0.1.x binding. Phase 1 callers compose the `event.domain` / `event.name` / per-domain attributes manually and call `logger.info(...)` directly.
+:::
+
+## Reserved domains
+
+Event domains are split into two tiers:
+
+- **Core-reserved** — bindings reject emits from user code on these domains: `dagstack.*`, `operation.*`, `progress.*`. Their semantics are fixed in the core spec.
+- **Extension-pack-reserved** — enforced only when the matching extension pack is loaded. The AI-agent pack (see [AI-agent observability](./ai-agents)) reserves `gen_ai.*`, `ai_agent.*`, `rag.*`, `agent.*`, `prompt.*`, `mcp.*`.
+
+User-defined domains follow reverse-DNS naming (`com.example.myapp.checkout`) to avoid collisions across applications.
+
+## Progress events
+
+Progress reporting (10 000 files indexed, an embedding batch, a training epoch) is a convention over LogRecord, not a separate API. The binding emits records with `event.domain = "progress"` and one of four names: `tick`, `started`, `completed`, `failed`.
+
+| Attribute | Type | Meaning |
+|---|---|---|
+| `progress.current` | int | Completed units. |
+| `progress.total` | int? | Total units if known; null for unknown-total streams. |
+| `progress.unit` | string | `"files"`, `"chunks"`, `"tokens"`, `"bytes"`, `"items"`. |
+| `progress.phase` | string? | `"discovery"`, `"chunking"`, `"embedding"`, `"upserting"`. |
+| `progress.rate` | float? | Unit/sec (sliding window). |
+| `progress.eta_ms` | int? | Estimated ms to completion when `total` is known. |
+| `operation.id` | string | Required — progress is always bound to an operation. |
+
+At high tick frequency the binding's helper rate-limits ticks (default `min_interval_ms=500`); `started` / `completed` / `failed` are always emitted without dropping.
+
+## See also
+
+- [AI-agent observability](./ai-agents) — the extension pack that builds on operations and typed events.
+- [Wire formats](./wire-formats) — how `event.*` attributes appear on the wire.
+- [ADR-0001 §5 (full normative text)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#5-semantic-conventions).

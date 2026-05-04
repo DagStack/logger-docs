@@ -1,0 +1,178 @@
+---
+sidebar_position: 6
+title: Локальные переопределения
+description: Временно подмени приёмники на отдельный запуск агента, тест или audit-эндпоинт через with_sinks, append_sinks и контекст-менеджер scope_sinks.
+slug: /concepts/scoped-overrides
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Локальные переопределения
+
+Локальное переопределение временно подменяет (или расширяет) приёмники логгера для ограниченной области выполнения. Оно существует ради трёх основных сценариев: захват логов в тестах, запись журнала аудита на отдельный запуск и включение debug-захвата для одного эндпоинта без правки глобальной конфигурации.
+
+## Три операции
+
+Спека (§6.1) определяет три операции над существующим логгером:
+
+| Операция | Эффект |
+|---|---|
+| `with_sinks([...])` | Возвращает дочерний логгер, чьи приёмники **заменяют** родительские. |
+| `append_sinks([...])` | Возвращает дочерний логгер, чьи приёмники — это родительские **плюс** переданные дополнительные. |
+| `without_sinks()` | Возвращает дочерний логгер **без приёмников** — отправки отбрасываются. |
+
+Каждая операция возвращает дочерний логгер; конфигурация родителя при этом не меняется. Возвращённый логгер не кешируется — вызов `Logger.get(name)` извне продолжает возвращать исходный экземпляр с его глобальными приёмниками.
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import Logger, InMemorySink, FileSink
+
+    logger = Logger.get("order_service")
+
+    # Заменить приёмники — отправки получает только InMemorySink.
+    test_logger = logger.with_sinks([InMemorySink(capacity=100)])
+    test_logger.info("captured here")
+
+    # Добавить приёмник — отправки получают и родительские, и дополнительный.
+    audit_logger = logger.append_sinks([FileSink("/var/log/audit.jsonl")])
+    audit_logger.info("audit event")
+
+    # Отбрасывание — отправки уходят в /dev/null.
+    silent_logger = logger.without_sinks()
+    silent_logger.info("never seen")
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { Logger, InMemorySink, FileSink } from "@dagstack/logger";
+
+    const logger = Logger.get("order_service");
+
+    // Заменить приёмники — отправки получает только InMemorySink.
+    const testLogger = logger.withSinks([new InMemorySink({ capacity: 100 })]);
+    testLogger.info("captured here");
+
+    // Добавить приёмник — отправки получают и родительские, и дополнительный.
+    const auditLogger = logger.appendSinks([new FileSink("/var/log/audit.jsonl")]);
+    auditLogger.info("audit event");
+
+    // Отбрасывание — отправки уходят в /dev/null.
+    const silentLogger = logger.withoutSinks();
+    silentLogger.info("never seen");
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    log := logger.Get("order_service")
+
+    // Заменить приёмники — отправки получает только InMemorySink.
+    testLog := log.WithSinks(logger.NewInMemorySink(100, 1))
+    testLog.Info("captured here", nil)
+
+    // Добавить приёмник — отправки получают и родительские, и дополнительный.
+    fileSink, _ := logger.NewFileSink("/var/log/audit.jsonl", 0, 0, 1)
+    auditLog := log.AppendSinks(fileSink)
+    auditLog.Info("audit event", nil)
+
+    // Отбрасывание — отправки уходят в /dev/null.
+    silentLog := log.WithoutSinks()
+    silentLog.Info("never seen", nil)
+    ```
+  </TabItem>
+</Tabs>
+
+## Лексически ограниченная область
+
+Для блочно-ограниченного захвата (тест-кейс, обработчик запроса, паттерн defer) спека определяет `scope_sinks` — контекст-менеджер, который подменяет приёмники **на самом исходном логгере** на время блока, а на выходе восстанавливает прежние.
+
+Ключевое отличие от `with_sinks`: `scope_sinks` модифицирует `self`, поэтому любой код, дотягивающийся до того же логгера через `Logger.get(name)` во время действия области, пишет в подменённые приёмники. Полезно, когда бизнес-логика разрешает логгеры по имени внутри себя и подсунуть альтернативный логгер сверху не получится.
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import Logger, InMemorySink
+
+    logger = Logger.get("order_service")
+    sink = InMemorySink(capacity=100)
+
+    with logger.scope_sinks([sink]):
+        run_business_logic()              # отправки через Logger.get("order_service") попадут в sink
+        # другие модули, вызывающие Logger.get("order_service") внутри блока,
+        # тоже отправляют в sink
+
+    # Вне блока отправки снова идут в глобальные приёмники.
+    assert len(sink.records()) > 0
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { Logger, InMemorySink } from "@dagstack/logger";
+
+    const logger = Logger.get("order_service");
+    const sink = new InMemorySink({ capacity: 100 });
+
+    await logger.scopeSinks([sink], async (scoped) => {
+        await runBusinessLogic();
+        // отправки через Logger.get("order_service") в этом callback
+        // попадают в sink; другие модули, вызывающие Logger.get("order_service")
+        // внутри, тоже отправляют в sink на время выполнения callback.
+    });
+
+    // Вне callback отправки снова идут в глобальные приёмники.
+    if (sink.records().length === 0) throw new Error("ничего не захвачено");
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    log := logger.Get("order_service")
+    sink := logger.NewInMemorySink(100, 1)
+
+    err := log.ScopeSinks(ctx, []logger.Sink{sink}, func(ctx context.Context) error {
+        runBusinessLogic(ctx)
+        // отправки через logger.Get("order_service") в этом callback
+        // попадают в sink; другие модули, вызывающие logger.Get("order_service")
+        // внутри, тоже отправляют в sink на время выполнения callback.
+        return nil
+    })
+    if err != nil {
+        // обработать
+    }
+
+    // Вне callback отправки снова идут в глобальные приёмники.
+    records := sink.Records()
+    _ = records
+    ```
+  </TabItem>
+</Tabs>
+
+## Сценарии
+
+### Тесты — InMemorySink для проверок
+
+Самый частый сценарий локального переопределения: захватить записи во время теста и потом проверить их. Полный пример смотри в [руководстве по тестированию](../guides/testing).
+
+### Аудит на отдельный запуск
+
+Оркестратор рабочих процессов может создавать scoped-логгер на каждый запуск, который пишет одновременно в глобальный OTLP-экспортёр (для агрегации между запусками) и в выделенный файловый приёмник (для аудита конкретного запуска). На финализации запуска файл закрывается и архивируется вместе с метаданными запуска.
+
+### Маскирование на отдельный hook
+
+Plugin-hook обрабатывает чувствительную полезную нагрузку — скажем, webhook от платёжного провайдера. Scoped-логгер оборачивает hook расширенным `RedactionProcessor` (Phase 2), маскирующим дополнительные поля схемы провайдера, не затрагивая остальное приложение.
+
+### Debug-сессия
+
+`capture_bodies: true` можно включить для одного запроса через debug-заголовок плюс проверку ACL. Middleware конструирует scoped-логгер с debug-флагом на длительность запроса; другие параллельные запросы остаются в режиме приватности.
+
+## Антипаттерны
+
+- **Долгоживущие scoped-логгеры.** Локальное переопределение, переживающее границы операции, — признак того, что на самом деле нужен отдельный именованный логгер (`Logger.get(name)`) с собственной конфигурацией. Scope должен быть кратковременным.
+- **Утечки scope через async-границы.** Реализация гарантирует изоляцию scope только внутри лексического блока. Если ты запускаешь async-задачу внутри блока `scope_sinks` и даёшь ей завершиться после выхода из блока, её отправки попадут в неправильные приёмники (или упадут на закрытом приёмнике). Используй `await` / `defer` / стратегию планирования, которая понимает контекст.
+- **Мутация приёмников внутри scope.** Scope захватывает ссылки на объекты приёмников, а не глубокие копии. Вызов `sink.close()` на захваченном приёмнике делает его невалидным для любого последующего кода, держащего ту же ссылку.
+
+## См. также
+
+- [Тестирование](../guides/testing) — паттерны использования InMemorySink.
+- [Приёмники](./sinks) — протокол Sink, на который опираются локальные переопределения.
+- [ADR-0001 §6 (полный нормативный текст)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#6-scoped-logger-overrides).

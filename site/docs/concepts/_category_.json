@@ -1,0 +1,11 @@
+{
+  "label": "Concepts",
+  "position": 2,
+  "collapsible": true,
+  "collapsed": false,
+  "link": {
+    "type": "generated-index",
+    "title": "Concepts",
+    "description": "Core concepts of the logger contract — severity, sinks, context propagation, operations and typed events, redaction, scoped overrides, wire formats, the AI-agent extension pack."
+  }
+}

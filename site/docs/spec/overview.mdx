@@ -1,0 +1,44 @@
+---
+sidebar_position: 1
+title: What the specification is
+description: The role of dagstack/logger-spec — an OTel-compatible logging contract for every dagstack subsystem. How ADRs differ from guides.
+slug: /spec/overview
+---
+
+# What the specification is
+
+`dagstack/logger-spec` is the normative source of truth for structured logging in the dagstack ecosystem. It pins down **what** must hold in any implementation (`dagstack/logger-python`, `dagstack/logger-typescript`, `dagstack/logger-go`) and **why** that choice was made.
+
+## How the "Specification" section differs from the guides
+
+| Section | Audience | What it gives you |
+|---|---|---|
+| [Concepts](../concepts/severity) | Application developer | Explains **how** the logger works today, in terms of a specific language. |
+| [Guides](../guides/configure) | Application developer | Walks through a task step by step. |
+| **Specification** (this section) | Implementation author / reviewer | Explains **why** a decision was made; pins down normative guarantees. |
+
+## ADRs
+
+As of v1.0, one ADR is in place:
+
+1. **[ADR-0001: Logger contract](./adr/0001-logger-contract)** — wire format, severity, the Logger API, sinks, semantic conventions, scoped overrides, configuration via config-spec, redaction, sampling, async / shutdown, conformance.
+
+Additional ADRs are queued for the post-pilot v1.1 backlog, including a structural split of the AI-agent extension pack into a dedicated ADR-0002, OTel GenAI version pinning policy, exception stacktrace formatting, and a deprecation path for the plugin-system Progress sink.
+
+## The normative source
+
+The pages in this section are a **descriptive prose summary** of the ADR. The formal normative text lives in [`dagstack/logger-spec`](https://github.com/dagstack/logger-spec/tree/main/adr). If you are working on changes inside an implementation, read the normative version: it covers every edge case, the serialisation rules, and the requirements on conformance fixtures.
+
+## How the specification changes
+
+1. Open an issue in [`dagstack/logger-spec`](https://github.com/dagstack/logger-spec/issues).
+2. Submit a PR with a new ADR or a revision of an existing one.
+3. Architect review plus sign-off from the maintainers of every implementation (each implementation must confirm that it can ship the change).
+4. After merge, update the implementations and refresh the summary in this section.
+
+## Related specifications
+
+- [`dagstack/config-spec`](https://github.com/dagstack/config-spec) — the logger reads its own configuration through the config stack ([logger-spec §9](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#9-configuration-via-config-spec)).
+- [`dagstack/plugin-system-spec`](https://github.com/dagstack/plugin-system-spec) — the plugin system's `instrumentation_scope` is associated with a plugin manifest; the Progress sink in plugin-system-spec ADR-0003 is absorbed by §5.3 of this spec as a particular case of a typed event over LogRecord.
+- [OpenTelemetry Log Data Model v1.24+](https://opentelemetry.io/docs/specs/otel/logs/data-model/) — the wire-format baseline.
+- [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) — the AI-agent extension pack commits to conformance with this set.

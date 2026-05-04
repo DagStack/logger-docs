@@ -1,0 +1,304 @@
+---
+sidebar_position: 1
+title: Go API — overview
+description: Reference for the public API of go.dagstack.dev/logger — Logger, Configure, severity emits, sinks, scoped overrides, LogRecord.
+slug: /api/go
+---
+
+# Go API — overview
+
+The `go.dagstack.dev/logger` module implements the logger contract for Go (1.22+). Phase 1 (currently published as v0.1.x; vanity URL backed by `github.com/dagstack/logger-go`) ships the core API plus three sinks; Phase 2 will add the OTLP exporter and a LogProcessor chain.
+
+## Public exports
+
+The package's surface (no sub-packages — flat `logger` namespace):
+
+| Symbol | Kind | File |
+|---|---|---|
+| `Logger` | struct (pointer methods) | `logger.go` |
+| `Get(name string) *Logger` | function | `logger.go` |
+| `GetVersioned(name, version string) *Logger` | function | `logger.go` |
+| `LogRecord` | struct | `records.go` |
+| `Resource` | struct | `records.go` |
+| `InstrumentationScope` | struct | `records.go` |
+| `Attrs` | type alias `map[string]any` | `records.go` |
+| `Severity` | typed `int` + constants | `severity.go` |
+| `SeverityTrace`, `SeverityDebug`, `SeverityInfo`, `SeverityWarn`, `SeverityError`, `SeverityFatal` | constants | `severity.go` |
+| `SeverityTextTrace`, `SeverityTextDebug`, `SeverityTextInfo`, `SeverityTextWarn`, `SeverityTextError`, `SeverityTextFatal` | constants | `severity.go` |
+| `CanonicalSeverityTexts` | array | `severity.go` |
+| `SeverityTextFor`, `IsValidSeverityNumber` | functions | `severity.go` |
+| `Sink` | interface | `sink.go` |
+| `ConsoleSink`, `ConsoleMode`, `ConsoleAuto`, `ConsoleJSON`, `ConsolePretty`, `NewConsoleSink` | types + constructor | `console_sink.go` |
+| `FileSink`, `NewFileSink` | type + constructor | `file_sink.go` |
+| `InMemorySink`, `NewInMemorySink` | type + constructor | `in_memory_sink.go` |
+| `Configure`, `ConfigureOption`, `WithRootLevel`, `WithSinks`, `WithPerLoggerLevels`, `WithResourceAttributes` | function + options | `configuration.go` |
+| `Subscription`, `NewInactiveSubscription` | type + constructor | `subscription.go` |
+| `RedactedPlaceholder`, `DefaultSecretSuffixes`, `IsSecretKey`, `RedactAttributes` | constants + functions | `redaction.go` |
+| `ActiveTraceContext`, `DefaultBaggageKeys` | function + constant | `context.go` |
+| `ToDagstackJSONL`, `ToDagstackJSONLDict` | functions | `wire.go` |
+| `CanonicalJSONMarshal`, `CanonicalJSONMarshalString` | functions | `canonical_json.go` |
+| `EncodeTraceID`, `EncodeSpanID`, `DecodeTraceID`, `DecodeSpanID` | functions | `trace_ids.go` |
+
+Import the package:
+
+```go
+import "go.dagstack.dev/logger"
+```
+
+## `Configure(opts ...ConfigureOption)` — global bootstrap
+
+```go
+type ConfigureOption func(*configureState)
+
+func Configure(opts ...ConfigureOption)
+
+func WithRootLevel(level any) ConfigureOption
+func WithSinks(sinks ...Sink) ConfigureOption
+func WithPerLoggerLevels(levels map[string]any) ConfigureOption
+func WithResourceAttributes(attrs Attrs) ConfigureOption
+```
+
+Bootstrap the global logger state. Sets the root logger's severity floor, attaches sinks, applies per-logger overrides, and seeds the OTel `Resource` with process-level attributes. Call once at application startup, before any business code calls `logger.Get(name)`.
+
+`level` accepts a string (`"INFO"`, `"warn"`, ...; case-insensitive) or an `int` in `[1, 24]`. An unknown name or out-of-range integer triggers a `panic` from the option constructor — typically caught by a top-level `recover()` at startup.
+
+The call is idempotent — calling `Configure` again replaces the previous setup atomically. Unspecified groups preserve their previous values, so a partial reconfigure stays safe.
+
+See the [Configure the logger](/docs/guides/configure) guide for a full walkthrough.
+
+## `Logger` — named logger registry
+
+```go
+type Logger struct{ /* unexported */ }
+
+// Registry accessors
+func Get(name string) *Logger
+func GetVersioned(name, version string) *Logger
+
+// Introspection
+func (l *Logger) Name() string
+func (l *Logger) Version() string
+func (l *Logger) EffectiveSinks() []Sink
+func (l *Logger) EffectiveMinSeverity() int
+func (l *Logger) EffectiveResource() *Resource
+
+// Configuration mutators
+func (l *Logger) SetSinks(sinks []Sink)
+func (l *Logger) SetMinSeverity(severityNumber int)
+func (l *Logger) SetResource(r *Resource)
+
+// Severity emits — non-context variants
+func (l *Logger) Trace(body any, attrs Attrs)
+func (l *Logger) Debug(body any, attrs Attrs)
+func (l *Logger) Info(body any, attrs Attrs)
+func (l *Logger) Warn(body any, attrs Attrs)
+func (l *Logger) Error(body any, attrs Attrs)
+func (l *Logger) Fatal(body any, attrs Attrs)
+func (l *Logger) Log(severityNumber int, body any, attrs Attrs)
+func (l *Logger) Exception(err error, body any, attrs Attrs)
+
+// Severity emits — context variants (auto-inject trace_id / span_id from ctx)
+func (l *Logger) TraceCtx(ctx context.Context, body any, attrs Attrs)
+func (l *Logger) DebugCtx(ctx context.Context, body any, attrs Attrs)
+func (l *Logger) InfoCtx(ctx context.Context, body any, attrs Attrs)
+func (l *Logger) WarnCtx(ctx context.Context, body any, attrs Attrs)
+func (l *Logger) ErrorCtx(ctx context.Context, body any, attrs Attrs)
+func (l *Logger) FatalCtx(ctx context.Context, body any, attrs Attrs)
+func (l *Logger) LogCtx(ctx context.Context, severityNumber int, body any, attrs Attrs)
+func (l *Logger) ExceptionCtx(ctx context.Context, err error, body any, attrs Attrs)
+
+// Scoped overrides
+func (l *Logger) WithSinks(sinks ...Sink) *Logger
+func (l *Logger) AppendSinks(extra ...Sink) *Logger
+func (l *Logger) WithoutSinks() *Logger
+func (l *Logger) Child(attrs Attrs) *Logger
+func (l *Logger) ScopeSinks(
+    ctx context.Context,
+    sinks []Sink,
+    fn func(context.Context) error,
+) error
+
+// Lifecycle
+type FlushResult struct {
+    Success     bool
+    Partial     bool
+    FailedSinks []FlushFailure
+}
+type FlushFailure struct {
+    SinkID string
+    Err    error
+}
+func (l *Logger) Flush(timeoutSeconds float64) (*FlushResult, error)
+func (l *Logger) Close() error
+
+// Subscription (Phase 1 — inactive)
+func (l *Logger) OnReconfigure(callback func()) *Subscription
+```
+
+Constructed only via `logger.Get(name)` / `logger.GetVersioned(name, version)`; the registry caches one instance per name and is safe for concurrent use. Children created by `Child(...)`, `WithSinks(...)`, `AppendSinks(...)`, `WithoutSinks(...)` are detached (non-cached) — they inherit configuration from their parent but do not participate in the global registry.
+
+`ScopeSinks` is the Go idiom for the spec's lexically scoped override. It accepts a callback, swaps sinks on the receiver for the callback's lifetime, and restores them on return (via `defer` internally) — including when the callback returns an error.
+
+## `Severity` — bucket constants
+
+```go
+type Severity int
+
+const (
+    SeverityTrace Severity = 1
+    SeverityDebug Severity = 5
+    SeverityInfo  Severity = 9
+    SeverityWarn  Severity = 13
+    SeverityError Severity = 17
+    SeverityFatal Severity = 21
+)
+
+const (
+    SeverityTextTrace = "TRACE"
+    SeverityTextDebug = "DEBUG"
+    SeverityTextInfo  = "INFO"
+    SeverityTextWarn  = "WARN"
+    SeverityTextError = "ERROR"
+    SeverityTextFatal = "FATAL"
+)
+
+var CanonicalSeverityTexts = [6]string{
+    SeverityTextTrace, SeverityTextDebug, SeverityTextInfo,
+    SeverityTextWarn,  SeverityTextError, SeverityTextFatal,
+}
+
+func SeverityTextFor(severityNumber int) (string, error)
+func IsValidSeverityNumber(severityNumber int) bool
+```
+
+The six bucket-baseline values plus the canonical text strings. See the [Severity reference table](/docs/reference/severity-table) for the full 1-24 enumeration.
+
+## Sinks
+
+Three concrete sinks plus the `Sink` interface:
+
+```go
+type Sink interface {
+    ID() string
+    Emit(record *LogRecord)
+    Flush(timeoutSeconds float64) error
+    Close() error
+    SupportsSeverity(severityNumber int) bool
+}
+
+// ConsoleSink
+type ConsoleMode int
+const (
+    ConsoleAuto ConsoleMode = iota
+    ConsoleJSON
+    ConsolePretty
+)
+
+func NewConsoleSink(mode ConsoleMode, stream io.Writer, minSeverity int) *ConsoleSink
+
+// FileSink
+func NewFileSink(path string, maxBytes int64, keep int, minSeverity int) (*FileSink, error)
+
+// InMemorySink
+func NewInMemorySink(capacity int, minSeverity int) *InMemorySink
+func (s *InMemorySink) Capacity() int
+func (s *InMemorySink) Records() []*LogRecord   // snapshot copy
+func (s *InMemorySink) Clear()
+```
+
+`NewConsoleSink` defaults `stream` to `os.Stderr` when `nil`. `ConsoleAuto` chooses pretty when the stream looks like a TTY, JSON otherwise.
+
+`NewFileSink` opens the path in append mode and rotates by size (`path.1`, `path.2`, ... up to `keep`). Setting `maxBytes <= 0` disables rotation entirely. Returns an error if the file cannot be opened.
+
+`NewInMemorySink` is a ring buffer for tests — the oldest record is dropped when capacity is exceeded. Concurrent emits are serialised under a mutex.
+
+See [Sinks](/docs/concepts/sinks) for usage and the [custom-sink guide](/docs/guides/custom-sink) for protocol implementation.
+
+## `LogRecord` — the typed struct
+
+```go
+type Attrs = map[string]any
+
+type LogRecord struct {
+    TimeUnixNano         int64
+    SeverityNumber       int
+    SeverityText         string
+    Body                 any
+    Attributes           Attrs
+    InstrumentationScope *InstrumentationScope
+    Resource             *Resource
+    TraceID              []byte    // 16 bytes when present, nil otherwise
+    SpanID               []byte    // 8 bytes when present, nil otherwise
+    TraceFlags           uint8
+    ObservedTimeUnixNano int64     // sink-filled; producer leaves 0
+}
+
+type InstrumentationScope struct {
+    Name       string
+    Version    string
+    Attributes Attrs
+}
+
+type Resource struct {
+    Attributes Attrs
+}
+```
+
+Per spec §1, the field set matches the OTel Log Data Model v1.24. Field names are PascalCase (Go convention); the dagstack JSON-lines wire format converts to snake_case keys. See [LogRecord fields](/docs/reference/log-record) for the full table with semantics and ownership.
+
+## Redaction helpers
+
+```go
+const RedactedPlaceholder = "***"
+
+var DefaultSecretSuffixes = []string{
+    "_key", "_secret", "_token", "_password", "_passphrase", "_credentials",
+}
+
+func IsSecretKey(key string, suffixes []string) bool
+func RedactAttributes(attrs Attrs, suffixes []string) Attrs
+```
+
+The Logger applies `RedactAttributes` automatically inside `emit`. The standalone helpers are exposed for sink implementers and tests that need to assert on the masked shape directly. Pass `nil` for `suffixes` to use `DefaultSecretSuffixes`.
+
+## Wire format
+
+```go
+func ToDagstackJSONL(record *LogRecord) (string, error)
+func ToDagstackJSONLDict(record *LogRecord) (map[string]any, error)
+```
+
+`ToDagstackJSONL` produces a single Canonical JSON line (snake_case keys, hex trace ids, integer timestamps, sorted keys recursively). Used internally by `ConsoleSink` in `ConsoleJSON` mode and by `FileSink`; exposed for callers that build their own sinks.
+
+## Context propagation
+
+```go
+var DefaultBaggageKeys = []string{"tenant.id", "request.id", "user.id"}
+
+func ActiveTraceContext(ctx context.Context) (
+    traceID, spanID []byte,
+    traceFlags uint8,
+)
+```
+
+`ActiveTraceContext` reads the active OTel `SpanContext` via `go.opentelemetry.io/otel/trace.SpanFromContext(ctx)` and returns the trace bytes ready for `LogRecord` fields. When no valid span context is present, all three return values are zero. Phase 1 ships the trace-context portion only — baggage extraction is gated on a Phase 2 enable flag.
+
+## `Subscription` — Phase 1 inactive
+
+`Subscription` mirrors the `config-spec` Subscription — `Path`, `Active`, `InactiveReason`. In Phase 1 the logger does not subscribe to runtime config changes; `Logger.OnReconfigure(callback)` returns an inactive subscription with `InactiveReason: "Phase 1 logger does not support watch-based reconfigure"`. Phase 2 will activate the watch path.
+
+## Idiomatic differences from Python
+
+- **`context.Context` first.** Severity emits accept an explicit `ctx` via the `*Ctx` variants (`InfoCtx`, `ExceptionCtx`, ...) to read OTel trace context. The non-context variants (`Info`, `Exception`, ...) skip propagation — useful for fire-and-forget startup / shutdown emits where there is no active span.
+- **PascalCase methods + struct fields.** `WithSinks`, `AppendSinks`, `SetMinSeverity`, `SeverityNumber` — Go convention. Wire-format keys (`severity_number`, `trace_id`, ...) keep snake_case to match the spec.
+- **Errors as values, panics for static misconfiguration.** `Logger.Flush` returns `(*FlushResult, error)`; `Logger.Close` returns `error`. The `Configure` option constructors (`WithRootLevel("BOGUS")`) panic at construction time so misconfigured startups fail fast — recover at the top-level handler if needed.
+- **`Attrs` is `map[string]any`.** Idiomatic Go; the binding's redaction walker handles nested `map[string]any`. `slog.Attr` interop is on the roadmap (Phase 2) — Phase 1 expects `Attrs` directly.
+- **`ScopeSinks(ctx, sinks, fn)`.** The Go idiom is the callback form (analogous to `func(t *testing.T)` and `errgroup.Go(...)`). The override is applied to the receiver directly, so concurrent goroutines emitting through `logger.Get(name)` during `fn` observe the same sinks.
+
+## See also
+
+- [Quick start](/docs/intro) — the shortest end-to-end example.
+- [Configure the logger](/docs/guides/configure) — full bootstrap walkthrough.
+- [Capturing logs in tests](/docs/guides/testing) — `InMemorySink` patterns.
+- [Implement a custom sink](/docs/guides/custom-sink) — protocol details.
+- [`go.dagstack.dev/logger` source on GitHub](https://github.com/dagstack/logger-go).

@@ -1,0 +1,254 @@
+---
+sidebar_position: 2
+title: Приёмники
+description: Протокол Sink и три приёмника Phase 1 — ConsoleSink, FileSink, InMemorySink. Маршрутизация по нескольким приёмникам с независимой фильтрацией по уровню.
+slug: /concepts/sinks
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Приёмники
+
+**Приёмник** (sink) — это получатель `LogRecord`. Логгер веером рассылает каждую отправленную запись всем подключённым приёмникам, прошедшим их фильтр `min_severity`. Приёмники независимы — сбой в одном не влияет на остальные.
+
+## Протокол Sink
+
+Каждый приёмник реализует четыре метода:
+
+```
+Sink {
+  id:                string                       # диагностический идентификатор (например, "console:auto", "file:/var/log/app.jsonl")
+  emit(record):      void                         # неблокирующий; ставит запись в очередь на доставку
+  flush(timeout):    void                         # блокирует до доставки буфера или истечения timeout
+  close():           void                         # flush + освобождение ресурсов
+  supports_severity(severity_number): bool        # подсказка для фильтра; отклонённые уровни пропускаются заранее
+}
+```
+
+Метод `emit` **не блокирует** вызывающий код. Блокирующий I/O (сетевые экспортёры, flush в файл) проходит через внутренний буфер и worker; при переполнении буфера приёмник по умолчанию отбрасывает самую старую запись и увеличивает счётчик отброшенных. Связка буфер / worker зависит от приёмника — `ConsoleSink` и `FileSink` из Phase 1 синхронизируют запись в stdout / файл под локом, а запланированный `OTLPSink` (Phase 2) использует фоновый worker.
+
+## Приёмники Phase 1
+
+Три приёмника поставляются в первом релизе каждого биндинга:
+
+| Приёмник | Куда уходят записи | Режим по умолчанию | Конфигурация |
+|---|---|---|---|
+| `ConsoleSink` | `sys.stderr` (по умолчанию) или любой текстовый поток | `auto` (TTY → pretty, не-TTY → JSON) | `mode`, `stream`, `min_severity` |
+| `FileSink` | Файл на диске, JSON-lines | JSON-lines с ротацией по размеру | `path`, `max_bytes`, `keep`, `min_severity` |
+| `InMemorySink` | Кольцевой буфер в процессе | отбрасывание при переполнении | `capacity`, `min_severity` |
+
+### ConsoleSink
+
+`ConsoleSink` пишет записи в `sys.stderr` (или выбранный текстовый поток) либо как цветной читаемый текст, либо как компактный JSON-lines. По умолчанию `mode="auto"` переключается по детектированию TTY — интерактивный терминал получает режим `pretty`; перенаправленный или захваченный вывод — JSON.
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import ConsoleSink
+
+    # Auto: pretty в TTY, JSON в остальных случаях.
+    sink = ConsoleSink(mode="auto")
+
+    # Принудительно JSON для логов в контейнере.
+    sink = ConsoleSink(mode="json", min_severity=9)
+
+    # Принудительно pretty для отладочного терминала.
+    sink = ConsoleSink(mode="pretty")
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { ConsoleSink } from "@dagstack/logger";
+
+    // Auto: pretty на TTY, JSON в остальных случаях.
+    let sink = new ConsoleSink({ mode: "auto" });
+
+    // Принудительно JSON для контейнерных логов.
+    sink = new ConsoleSink({ mode: "json", minSeverity: 9 });
+
+    // Принудительно pretty для отладочного терминала.
+    sink = new ConsoleSink({ mode: "pretty" });
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    import (
+        "os"
+
+        "go.dagstack.dev/logger"
+    )
+
+    // Auto: pretty на TTY, JSON в остальных случаях. nil для stream → os.Stderr.
+    sink := logger.NewConsoleSink(logger.ConsoleAuto, nil, 1)
+
+    // Принудительно JSON для контейнерных логов.
+    sink = logger.NewConsoleSink(logger.ConsoleJSON, os.Stdout, int(logger.SeverityInfo))
+
+    // Принудительно pretty для отладочного терминала.
+    sink = logger.NewConsoleSink(logger.ConsolePretty, nil, 1)
+    ```
+  </TabItem>
+</Tabs>
+
+### FileSink
+
+`FileSink` пишет Canonical JSON-lines в файл и ротирует его по размеру. Python-биндинг использует `RotatingFileHandler` из stdlib под капотом — проверенную в бою реализацию ротации — и поверх применяет dagstack-формат JSON-lines.
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import FileSink
+
+    sink = FileSink(
+        "/var/log/order-service.jsonl",
+        max_bytes=100_000_000,        # ротировать на 100 МБ
+        keep=10,                       # хранить 10 архивных файлов
+        min_severity=9,                # INFO и выше
+    )
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { FileSink } from "@dagstack/logger";
+
+    const sink = new FileSink("/var/log/order-service.jsonl", {
+        maxBytes: 100_000_000,    // ротировать на 100 МБ
+        keep: 10,                  // хранить 10 архивных файлов
+        minSeverity: 9,            // INFO и выше
+    });
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    sink, err := logger.NewFileSink(
+        "/var/log/order-service.jsonl",
+        100_000_000,                  // maxBytes — ротировать на 100 МБ
+        10,                            // keep — хранить 10 архивных файлов
+        int(logger.SeverityInfo),      // minSeverity — INFO и выше
+    )
+    if err != nil {
+        // не удалось открыть файл
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+`max_bytes=0` отключает ротацию (файл растёт, пока оператор не урежет или не переместит его). `keep=0` удаляет архивные файлы сразу при ротации — остаётся только текущий.
+
+### InMemorySink
+
+`InMemorySink` накапливает записи в ограниченном кольцевом буфере; при заполнении буфера самые старые записи отбрасываются. Предназначен для тестов и кратковременных диагностических захватов.
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import InMemorySink
+
+    sink = InMemorySink(capacity=100)
+    # ... отправляем какие-то записи ...
+
+    records = sink.records()                     # снимок (копия)
+    assert any(r.body == "expected message" for r in records)
+
+    sink.clear()                                  # сброс перед следующим тестом
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { InMemorySink } from "@dagstack/logger";
+
+    const sink = new InMemorySink({ capacity: 100 });
+    // ... отправляем какие-то записи ...
+
+    const records = sink.records();         // снимок (копия)
+    if (!records.some((r) => r.body === "expected message")) {
+        throw new Error("ожидаемая запись отсутствует");
+    }
+
+    sink.clear();                           // сброс перед следующим тестом
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    sink := logger.NewInMemorySink(100, 1) // capacity=100, minSeverity=1
+    // ... отправляем какие-то записи ...
+
+    records := sink.Records() // снимок (копия)
+    // проверки по records[i].Body, records[i].Attributes, ...
+
+    sink.Clear() // сброс перед следующим тестом
+    ```
+  </TabItem>
+</Tabs>
+
+`InMemorySink` не реализует сериализацию в формат передачи — он хранит объекты `LogRecord` напрямую, так что проверки в тестах могут читать типизированные `body`, `attributes` и `severity_number` без парсинга JSON.
+
+## Маршрутизация по нескольким приёмникам
+
+Логгер можно настроить с несколькими приёмниками. Каждый применяет собственный фильтр `min_severity` независимо от остальных. Типичная production-конфигурация пишет предупреждения и выше в консоль, все записи `INFO` и выше — в файл для разбора инцидентов, а ошибки — отдельно в удалённый приёмник.
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import ConsoleSink, FileSink, configure
+
+    configure(
+        root_level="DEBUG",
+        sinks=[
+            ConsoleSink(mode="pretty", min_severity=13),               # WARN+ в консоль
+            FileSink("/var/log/app.jsonl", max_bytes=100_000_000, keep=10, min_severity=9),
+        ],
+    )
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { ConsoleSink, FileSink, configure } from "@dagstack/logger";
+
+    configure({
+        rootLevel: "DEBUG",
+        sinks: [
+            new ConsoleSink({ mode: "pretty", minSeverity: 13 }),                            // WARN+ в консоль
+            new FileSink("/var/log/app.jsonl", { maxBytes: 100_000_000, keep: 10, minSeverity: 9 }),
+        ],
+    });
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    fileSink, _ := logger.NewFileSink("/var/log/app.jsonl", 100_000_000, 10, int(logger.SeverityInfo))
+
+    logger.Configure(
+        logger.WithRootLevel("DEBUG"),
+        logger.WithSinks(
+            logger.NewConsoleSink(logger.ConsolePretty, nil, int(logger.SeverityWarn)), // WARN+ в консоль
+            fileSink,
+        ),
+    )
+    ```
+  </TabItem>
+</Tabs>
+
+## Roadmap
+
+Набор Phase 1 поставляется в каждом биндинге. Phase 2 добавляет OTel-экспортёр и несколько распространённых production-приёмников; Phase 3 добавляет облачные и высоконагруженные интеграции.
+
+| Приёмник | Phase | Заметки |
+|---|---|---|
+| `OTLPSink` | 2 | OTLP/gRPC или OTLP/HTTP — основной production-экспортёр. |
+| `SyslogSink` | 2 | BSD syslog и транспорт RFC 5424. |
+| `SentrySink` | 2 | Только `ERROR` и выше; `body` и атрибуты становятся событием Sentry. |
+| `LokiSink` | 2 | Для развёртываний без OTel-коллектора. |
+| `FluentBitForwardSink` | 2 | Протокол Fluent Bit Forward — распространённый sidecar-паттерн. |
+| `CloudWatchLogsSink` | 3 | AWS CloudWatch Logs с пакетной отправкой. |
+| `GCPCloudLoggingSink` | 3 | Google Cloud Logging с OAuth / service account. |
+| `KafkaSink` | 3 | Высокопроизводительные конвейеры. |
+| `ElasticsearchSink` | 3 | Elasticsearch bulk API. |
+
+## См. также
+
+- [Форматы передачи](./wire-formats) — что за байты выдаёт каждый приёмник.
+- [Настройка логгера](../guides/configure) — полная пошаговая инициализация.
+- [Реализация собственного приёмника](../guides/custom-sink) — протокол Sink со стороны автора приёмника.
+- [ADR-0001 §7 (полный нормативный текст)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#7-sinks-and-adapters).

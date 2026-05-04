@@ -1,0 +1,90 @@
+---
+sidebar_position: 1
+title: Поля LogRecord
+description: Справочная таблица всех полей dataclass LogRecord — тип, опциональность, семантика, владение, кодирование на wire.
+slug: /reference/log-record
+---
+
+# Поля LogRecord
+
+Внутреннее представление строки лога. Каждый биндинг отдаёт типизированный dataclass `LogRecord` с полями ниже; wire-сериализация живёт в отдельных функциях (см. [Форматы передачи](../concepts/wire-formats)).
+
+## Таблица полей
+
+| Поле | Тип | Опционально | По умолчанию | Заполняется | Значение |
+|---|---|---|---|---|---|
+| `time_unix_nano` | `int` (uint64) | нет | `time.time_ns()` на emit | источник записи | Временная метка emit, наносекунды от Unix epoch (OTel `TimeUnixNano`). |
+| `severity_number` | `int` | нет | — | вызывающий | OTel severity 1–24. |
+| `severity_text` | `str` | нет | производное от `severity_number` | биндинг | Одна из шести канонических строк (`TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`). |
+| `body` | `Value` | нет | — | вызывающий | Основное сообщение — строка или структура (map/array/scalar). |
+| `attributes` | `dict[str, Value]` | да | `{}` | вызывающий + биндинг | Контекст вида ключ-значение на запись. Маскирование применяется до веерной рассылки. |
+| `instrumentation_scope` | `InstrumentationScope?` | да | `null` | биндинг | Самоописание логгера (имя, версия). Заполняется, когда используется `Logger.get(name, version)`. |
+| `resource` | `Resource?` | да | `null` | биндинг | Атрибуты процесса / сервиса / хоста. Унаследованы от root-логгера после `configure(resource_attributes=...)`. |
+| `trace_id` | `bytes(16)?` | да | `null` | биндинг | W3C Trace Context — 16 случайных байт. Заполняется из OTel-контекста, если активен span. |
+| `span_id` | `bytes(8)?` | да | `null` | биндинг | W3C Trace Context — 8 случайных байт. Тот же источник, что у `trace_id`. |
+| `trace_flags` | `int` (uint8) | нет | `0` | биндинг | Флаги W3C (бит sampled и т. п.). `0` — не сэмплировано. |
+| `observed_time_unix_nano` | `int?` (uint64) | да | `null` | приёмник (на этапе приёма) | Временная метка приёма на приёмнике. Источник записи оставляет `null`; приёмник заполняет до wire-сериализации (по спеке §1). |
+
+## Тип `Value`
+
+`Value` — это рекурсивный sum-тип, используемый для `body` и значений атрибутов. Конкретная форма:
+
+```
+Value = str | int | float | bool | null | dict[str, Value] | list[Value]
+```
+
+Та же форма стоит за `ConfigTree` в [`config-spec`](https://config.dagstack.dev/docs/concepts/sources) §1; потребители могут переиспользовать один тип уровня языка, чтобы представлять и то, и другое. Значения JSON-сериализуемы (множество `Value` ровно совпадает с множеством JSON-значений).
+
+## `InstrumentationScope`
+
+Самоописание логгера, отправившего запись:
+
+| Поле | Тип | Значение |
+|---|---|---|
+| `name` | `str` | Имя логгера (совпадает с аргументом `Logger.get(name)`). |
+| `version` | `str?` | Семантическая версия, задаётся через `Logger.get(name, version)`. |
+| `attributes` | `dict[str, Value]` | Опциональные атрибуты уровня scope. |
+
+Для записей, отправленных плагином, scope рекомендуется выставлять равным `id` и `version` плагина из его `PluginManifest` (см. `dagstack/plugin-system-spec`).
+
+## `Resource`
+
+Атрибуты уровня процесса, общие для всех логгеров в процессе:
+
+| Поле | Тип | Значение |
+|---|---|---|
+| `attributes` | `dict[str, Value]` | Атрибуты OTel Resource — `service.name`, `service.version`, `service.instance.id`, `deployment.environment`, `host.name`, `process.pid`, `telemetry.sdk.{name,version,language}` и т. п. |
+
+Биндинг определяет атрибуты Resource через:
+
+1. Автодетект OTel (env-переменная `OTEL_RESOURCE_ATTRIBUTES`, OTel Resource Detectors).
+2. Явный конфиг из секции `logging.resource.*`.
+3. Слияние: автодетект ∪ конфиг (конфиг выигрывает).
+
+## Владение полями
+
+По спеке §1 правила владения:
+
+- **Вызывающий** задаёт `severity_number`, `body`, опциональные `attributes`. Вызывающий никогда не выставляет `time_unix_nano` напрямую; биндинг заполняет его на emit.
+- **Биндинг** заполняет `time_unix_nano`, `severity_text`, `instrumentation_scope`, `resource`, `trace_id`, `span_id`, `trace_flags` плюс любые атрибуты, добавленные через проброс Baggage.
+- **Приёмник** заполняет `observed_time_unix_nano`, если источник записи оставил его `null`. Это гарантирует, что wire-вывод всегда несёт временную метку приёма.
+
+## Обзор кодирования на wire
+
+Тот же набор полей сериализуется в три формата — каждый со своими правилами кодирования. Полную таблицу смотри на странице [Форматы передачи](../concepts/wire-formats); короткая версия:
+
+| Поле | OTLP protobuf | OTel JSON | dagstack JSON-lines |
+|---|---|---|---|
+| `time_unix_nano` | `fixed64` | десятичная строка | int (Canonical JSON допускает int64) |
+| `trace_id` | `bytes(16)` | строчные 32-hex | строчные 32-hex |
+| `span_id` | `bytes(8)` | строчные 16-hex | строчные 16-hex |
+| `severity_number` | int | int | int |
+| `severity_text` | string | string | string |
+| Регистр | (бинарный) | camelCase | snake_case |
+
+## См. также
+
+- [Справочная таблица уровней](./severity-table) — полное перечисление 24 строк.
+- [Форматы передачи](../concepts/wire-formats) — правила кодирования на формат.
+- [Проброс контекста](../concepts/context) — что заполняет `trace_id` / `span_id`.
+- [ADR-0001 §1 (полный нормативный текст)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#1-log-data-model-wire-format).

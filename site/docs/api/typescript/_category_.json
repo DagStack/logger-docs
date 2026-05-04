@@ -1,0 +1,11 @@
+{
+  "label": "TypeScript",
+  "position": 2,
+  "collapsible": true,
+  "collapsed": true,
+  "link": {
+    "type": "generated-index",
+    "title": "TypeScript API",
+    "description": "Reference for the public API of the @dagstack/logger npm package."
+  }
+}

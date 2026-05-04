@@ -1,0 +1,127 @@
+---
+sidebar_position: 1
+title: ADR-0001 · Контракт логгера
+description: Нормативный контракт — OTel-совместимый формат передачи, модель уровней, API логгера, приёмники, семантические соглашения, локальные переопределения, маскирование, async/shutdown.
+slug: /spec/adr/0001-logger-contract
+---
+
+# ADR-0001 · Контракт логгера — OTel-совместимое структурированное логирование
+
+**Status**: accepted v1.0 (2026-04-19) · [Полный нормативный текст](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md)
+
+## Зачем единая спецификация логгера
+
+Приложения dagstack используют разрозненное логирование — Python `logging` плюс `structlog`, TypeScript `pino` или `winston`, Go `zap` или `slog`. Итог — непереносимые записи логов, потерянный trace context на границах сервисов, фрагментация OTel-экспортёров, разбросанное маскирование и отсутствие реконфигурации в рантайме.
+
+ADR-0001 кодифицирует контракт логгера, единый для всех языков: формат передачи на основе OTel Log Data Model, API логгера, план развития приёмников-адаптеров и интеграцию с `config-spec` для конфигурации и реконфигурации в рантайме.
+
+## Формат передачи
+
+Внутренний `LogRecord` структурно идентичен OTel Log Data Model v1.24. Имена полей совпадают с нормативной спецификацией OTel (`time_unix_nano`, `observed_time_unix_nano`, `severity_number`, `severity_text`, `body`, `attributes`, `resource`, `instrumentation_scope`, `trace_id` как 16 байт, `span_id` как 8 байт, `trace_flags`).
+
+Тот же внутренний record сериализуется в три формата передачи:
+
+- **OTLP protobuf** — нативный wire OTel (`OTLPSink` в Phase 2).
+- **OTel JSON** — camelCase-ключи, десятичные строки наносекунд, hex trace id (`OTLPSink` HTTP+JSON, `FileSink` режим OTLP, `ConsoleSink` режим JSON).
+- **dagstack JSON-lines** — snake_case-ключи, целые наносекунды, Canonical JSON с отсортированными ключами (`FileSink` режим по умолчанию, `ConsoleSink` wire-режим).
+
+`observed_time_unix_nano` заполняет приёмник на этапе приёма, если источник записи оставил его `null`; это гарантирует, что wire-вывод всегда несёт временную метку приёма.
+
+## Модель уровней
+
+Уровни — целое число в диапазоне `1..24` плюс шесть канонических строк для `severity_text` (`TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`). Границы групп: 1–4 → TRACE, 5–8 → DEBUG, 9–12 → INFO, 13–16 → WARN, 17–20 → ERROR, 21–24 → FATAL. Реализации отдают основные имена как методы (`trace`, `debug`, `info`, `warn`, `error`, `fatal`) с `severity_number` 1, 5, 9, 13, 17, 21; промежуточные значения идут через универсальный `log(severity_number, ...)`.
+
+Запланированный файл `_meta/severity.yaml` станет источником истины в v1.1 — реализации будут потреблять его через vendoring. В реализациях v1.0 значения поставляются инлайн; YAML появляется постепенно на этапе v1.0 → v1.1.
+
+## API логгера
+
+Логгер идентифицируется именем в нотации с точкой (`dagstack.rag.retriever`); иерархия родитель — потомок задаётся через префикс с точкой. Приёмники и нижняя граница уровня наследуются от родителя, если на потомке не переопределены.
+
+Основные методы:
+
+- Emit по уровню — `trace`, `debug`, `info`, `warn`, `error`, `fatal`.
+- Универсальный emit — `log(severity_number, body, attributes)`.
+- Emit исключения — `exception(err, attributes)` заполняет `exception.type`, `exception.message`, `exception.stacktrace` по семантическим соглашениям OTel.
+- Дочерние логгеры — `with(attrs)` возвращает потомка с заранее прикреплёнными атрибутами.
+- Локальные переопределения — `with_sinks`, `append_sinks`, `without_sinks`, `scope_sinks` (по спеке §6).
+- Жизненный цикл — `flush(timeout)`, `close()`.
+
+**Методы неблокирующие.** `logger.info(...)` возвращается сразу; приёмники ставят запись в очередь на доставку. Вызывающий никогда не ждёт сетевого I/O.
+
+## Приёмники
+
+Приёмник — получатель записей. Протокол повторяет `ConfigSource` из `config-spec`: `id`, `emit()`, `flush(timeout)`, `close()` плюс подсказка для фильтра `supports_severity(severity_number)`.
+
+Phase 1 поставляет `ConsoleSink` (stdout/stderr, JSON или pretty), `FileSink` (локальный файл с ротацией), `InMemorySink` (кольцевой буфер для тестов). Phase 2 добавляет `OTLPSink`, `LokiSink`, `SentrySink`, `SyslogSink`, `FluentBitForwardSink`. Phase 3 добавляет облачные приёмники (CloudWatch, GCP Cloud Logging, Kafka, Elasticsearch).
+
+Маршрутизация по нескольким приёмникам применяет фильтр `min_severity` для каждого приёмника, и каждый приёмник изолирован от сбоев других.
+
+Зарезервированный именованный логгер `dagstack.logger.internal` несёт самодиагностику логгера (сбои приёмников, переполнение буфера, ошибки валидации схемы) с выделенным stderr-приёмником, который не наследует от root — это предотвращает бесконечные циклы, если приёмники root сами сломаны.
+
+## Семантические соглашения
+
+Поверх формата передачи спека публикует набор соглашений:
+
+- **Операции** — `operation.name`, `operation.id`, `operation.kind`, `operation.parent.id`, `operation.status`, `operation.duration_ms` для любой длительной единицы работы.
+- **Типизированные события** — `event.domain`, `event.name`, `event.schema_version` плюс обязательные атрибуты домена; схемы будут жить в `_meta/events/<domain>.yaml` (запланировано в v1.1; в реализациях v1.0 списки атрибутов на каждый домен поставляются инлайн).
+- **События прогресса** — соглашение поверх LogRecord с `event.domain = "progress"` (`tick`, `started`, `completed`, `failed`); поглощает Progress sink из plugin-system-spec.
+- **Метаданные с подсказками типов** — суффиксные подсказки атрибутов для рендеринга в UI (`*.url`, `*.path`, `*.markdown`, `*.duration_ms`, ...).
+- **Extension pack для AI-агентов** — опциональный pack с conformance к OTel GenAI (`gen_ai.*`, `mcp.*`) плюс dagstack-специфичные пространства имён (`rag.*`, `agent.*`, `prompt.*`); см. [отдельную страницу концепции](/docs/concepts/ai-agents).
+
+Зарезервированные домены делятся на зарезервированные ядром (всегда применяются) и зарезервированные расширениями (применяются, только когда pack загружен).
+
+## Локальные переопределения логгера
+
+Локальное переопределение временно заменяет, расширяет или опустошает приёмники логгера для ограниченной области выполнения:
+
+- `with_sinks([...])`, `append_sinks([...])`, `without_sinks()` — возвращают дочерний логгер.
+- `scope_sinks([...])` — контекст-менеджер / callback / `ctx + defer` (по идиоме языка), подменяющий приёмники на исходном логгере на время блока.
+
+Сценарии: тесты с `InMemorySink`, аудит на отдельный запуск, маскирование на отдельный hook, debug-сессия с захватом body. Антипаттерны: долгоживущие scoped-логгеры, утечки scope через async-границы.
+
+## Конфигурация через config-spec
+
+Логгер — потребитель `dagstack/config-spec`, а не самостоятельный загрузчик конфигурации. Секция `logging:` в YAML (по спеке §9.1) несёт `level`, `resource`, `loggers` (переопределения по логгерам), `sinks` (конфигурация на каждый приёмник) и `processors` (цепочка Phase 2).
+
+`Logger.configure(...)` (или `configure(...)` в Python-реализации) — точка входа bootstrap. Реконфигурация в рантайме идёт через `config.onSectionChange("logging", ...)` плюс атомарную замену `Logger.reconfigure(new)`; если новые приёмники не инициализируются, реконфигурация отвергается и старая конфигурация остаётся активной (по аналогии с rollback валидации в config-spec).
+
+## Маскирование
+
+Список суффиксов по умолчанию: `*_key`, `*_secret`, `*_token`, `*_password`, `*_passphrase`, `*_credentials`. Совпадение по ключу — без учёта регистра; значение заменяется на буквальную строку `"***"`. Рекурсия применяется через вложенные maps. Body **не** маскируется — разработчики форматируют body без секретов.
+
+Список шаблонов общий с config-spec через `config-spec/_meta/secret_patterns.yaml`.
+
+## Сэмплирование
+
+Phase 1: фильтр по уровню (`min_severity` для каждого логгера и каждого приёмника). Phase 2 вводит сэмплеры на основе процессоров (`sampler_rate`, `sampler_trace_ratio`). Tail-based сэмплирование делегируется OTel-коллектору и **не** входит в контракт.
+
+## Самонаблюдаемость
+
+Phase 2 предписывает собственные метрики — `records_emitted_total`, `records_dropped_total`, `sink_flush_duration_seconds`, `sink_errors_total`, `reconfigure_total`, `active_loggers_gauge`, `buffer_depth`. В Phase 1 они опциональны. Имена метрик следуют семантическим соглашениям OTel (префикс `otel.logger.*`).
+
+## Async и shutdown
+
+Неблокирующий emit — это контракт: `logger.info(...)` возвращается сразу, приёмники пакуют записи, вызывающий никогда не ждёт I/O. Стратегия переполнения настраивается на каждом приёмнике (`drop_oldest` по умолчанию, `drop_newest`, `block`).
+
+Протокол shutdown: `flush(timeout) -> FlushResult { success, partial, failed_sinks: [{sink_id, error}] }` и `close()`. Приложение должно вызывать `close()` в shutdown-хуке (`atexit` / SIGTERM / lifespan FastAPI).
+
+## Conformance
+
+Реализация conformant с v1.0, когда проходит четыре категории тестов: цикл сериализации формата передачи (каждый объявленный формат), проброс контекста (`trace_id` / `span_id` из OTel-контекста), семантические соглашения (операции / типизированные события / progress / extension pack для AI-агентов), приёмники Phase 1 (неблокирующий emit, учёт отброшенных записей, flush + close).
+
+Реализация может публиковаться под тегом `phase1-partial`, если покрывает только dagstack JSON-lines (без OTLP-форматов), проброс контекста, подмножество §5 по операциям и приёмники Phase 1.
+
+## Что вне scope
+
+- SDK для трассировки и метрик — используй OTel напрямую.
+- Tail-based sampling — забота коллектора / бэкенда.
+- Сканирование body по шаблонам (regex по `body` для общего детектирования секретов) — дорого, ненадёжно.
+- Правила алертинга на логах — забота бэкенда.
+- Изоляция логов между tenants — забота инфраструктуры.
+
+## См. также
+
+- Секция [Концепции](/docs/concepts/severity) — прикладное описание каждого решения выше.
+- Секция [Руководства](/docs/guides/configure) — практические пошаговые задачи.
+- [Справочник по LogRecord](/docs/reference/log-record) — полная таблица полей.
+- [Полный нормативный ADR-0001](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md) — каждый пограничный случай, conformance-фикстура и пункт пост-v1.0 бэклога.

@@ -1,0 +1,127 @@
+---
+sidebar_position: 1
+title: ADR-0001 · Logger contract
+description: Normative contract — OTel-compatible wire format, severity model, Logger API, sinks, semantic conventions, scoped overrides, redaction, async/shutdown.
+slug: /spec/adr/0001-logger-contract
+---
+
+# ADR-0001 · Logger contract — OTel-compatible structured logging
+
+**Status**: accepted v1.0 (2026-04-19) · [Full normative text](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md)
+
+## Why a unified logger specification
+
+dagstack applications use ad-hoc logging — Python `logging` plus `structlog`, TypeScript `pino` or `winston`, Go `zap` or `slog`. The result is non-portable log records, lost trace context across service boundaries, OTel exporter fragmentation, scattered redaction, and no runtime reconfiguration.
+
+ADR-0001 codifies a cross-language logger contract: a wire format based on the OTel Log Data Model, a Logger API, a sink-adapter roadmap, and integration with `config-spec` for configuration and runtime reconfiguration.
+
+## The wire format
+
+The internal `LogRecord` is structurally identical to the OTel Log Data Model v1.24. Field names match the OTel normative spec (`time_unix_nano`, `observed_time_unix_nano`, `severity_number`, `severity_text`, `body`, `attributes`, `resource`, `instrumentation_scope`, `trace_id` as 16 bytes, `span_id` as 8 bytes, `trace_flags`).
+
+Three wire formats serialise the same internal record:
+
+- **OTLP protobuf** — the native OTel wire (`OTLPSink` in Phase 2).
+- **OTel JSON** — camelCase keys, string-decimal nanoseconds, hex trace ids (`OTLPSink` HTTP+JSON, `FileSink` OTLP mode, `ConsoleSink` JSON mode).
+- **dagstack JSON-lines** — snake_case keys, integer nanoseconds, Canonical JSON sorted keys (`FileSink` default mode, `ConsoleSink` wire mode).
+
+`observed_time_unix_nano` is filled by the sink at ingest if the producer left it null — a guarantee that wire output always carries the ingest timestamp.
+
+## The severity model
+
+Severity is the integer range `1..24` with six canonical strings for `severity_text` (`TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`). Bucket boundaries: 1-4 → TRACE, 5-8 → DEBUG, 9-12 → INFO, 13-16 → WARN, 17-20 → ERROR, 21-24 → FATAL. Bindings expose primary names as methods (`trace`, `debug`, `info`, `warn`, `error`, `fatal`) with `severity_number` 1, 5, 9, 13, 17, 21; intermediate values go through the generic `log(severity_number, ...)`.
+
+A planned `_meta/severity.yaml` file will be the source of truth in v1.1 — bindings will consume it as a vendored copy. v1.0 bindings ship the values inline; the YAML lands incrementally during the v1.0 → v1.1 phase.
+
+## The Logger API
+
+A logger is identified by a dot-notation name (`dagstack.rag.retriever`); the hierarchy is parent / child via dot-prefix. Sinks and severity floor inherit from the parent unless overridden on the child.
+
+Primary methods:
+
+- Severity emits — `trace`, `debug`, `info`, `warn`, `error`, `fatal`.
+- Generic emit — `log(severity_number, body, attributes)`.
+- Exception emit — `exception(err, attributes)` populates `exception.type`, `exception.message`, `exception.stacktrace` per OTel semantic conventions.
+- Child loggers — `with(attrs)` returns a child with pre-attached attributes.
+- Scoped overrides — `with_sinks`, `append_sinks`, `without_sinks`, `scope_sinks` (per spec §6).
+- Lifecycle — `flush(timeout)`, `close()`.
+
+**Methods are non-blocking.** `logger.info(...)` returns immediately; sinks queue the record for delivery. The caller never waits for network I/O.
+
+## Sinks
+
+A sink is a destination for records. The protocol mirrors `ConfigSource` from `config-spec`: an `id`, an `emit()`, a `flush(timeout)`, a `close()`, plus a `supports_severity(severity_number)` filter hint.
+
+Phase 1 ships `ConsoleSink` (stdout/stderr, JSON or pretty), `FileSink` (local file with rotation), `InMemorySink` (ring buffer for tests). Phase 2 adds `OTLPSink`, `LokiSink`, `SentrySink`, `SyslogSink`, `FluentBitForwardSink`. Phase 3 adds cloud sinks (CloudWatch, GCP Cloud Logging, Kafka, Elasticsearch).
+
+Multi-sink routing applies a per-sink `min_severity` filter, with each sink isolated from the others' failures.
+
+The reserved `dagstack.logger.internal` named logger carries the logger's self-diagnostics (sink failures, buffer overflow, schema validation failures), with a dedicated stderr sink that does not inherit from the root — preventing infinite loops if the root's sinks are themselves broken.
+
+## Semantic conventions
+
+On top of the wire format, the spec publishes a set of conventions:
+
+- **Operations** — `operation.name`, `operation.id`, `operation.kind`, `operation.parent.id`, `operation.status`, `operation.duration_ms` for any long-running unit of work.
+- **Typed events** — `event.domain`, `event.name`, `event.schema_version` plus per-domain required attributes; schemas will live in `_meta/events/<domain>.yaml` (planned in v1.1; v1.0 bindings ship the per-domain attribute lists inline).
+- **Progress events** — a convention over LogRecord with `event.domain = "progress"` (`tick`, `started`, `completed`, `failed`); absorbs the Progress sink from plugin-system-spec.
+- **Metadata type hints** — suffix-based attribute hints for UI rendering (`*.url`, `*.path`, `*.markdown`, `*.duration_ms`, ...).
+- **AI-agent extension pack** — optional pack with OTel GenAI conformance (`gen_ai.*`, `mcp.*`) plus dagstack-specific namespaces (`rag.*`, `agent.*`, `prompt.*`); see [the dedicated concept page](/docs/concepts/ai-agents).
+
+Reserved domains split into core-reserved (always enforced) and extension-pack-reserved (enforced only when the pack is loaded).
+
+## Scoped logger overrides
+
+A scoped override temporarily replaces, augments, or empties a logger's sinks for a limited execution scope:
+
+- `with_sinks([...])`, `append_sinks([...])`, `without_sinks()` — return a child logger.
+- `scope_sinks([...])` — context manager / callback / `ctx + defer` (per language idiom) that swaps sinks on the original logger for the duration of the block.
+
+Use cases: tests with `InMemorySink`, per-run audit, per-hook redaction, debug-session body capture. Anti-patterns: long-lived scoped loggers, scope leaks across async boundaries.
+
+## Configuration via config-spec
+
+The logger is a consumer of `dagstack/config-spec`, not a standalone config loader. The `logging:` section in YAML (per spec §9.1) carries `level`, `resource`, `loggers` (per-logger overrides), `sinks` (per-sink configuration), and `processors` (Phase 2 chain).
+
+`Logger.configure(...)` (or `configure(...)` in the Python binding) is the bootstrap entry point. Runtime reconfiguration is mediated by `config.onSectionChange("logging", ...)` plus an atomic-swap `Logger.reconfigure(new)`; if the new sinks fail to initialise, the reconfigure is rejected and the old config keeps active (parallel to config-spec's validation rollback).
+
+## Redaction
+
+Default suffix list: `*_key`, `*_secret`, `*_token`, `*_password`, `*_passphrase`, `*_credentials`. Match is case-insensitive on the key; the value is replaced with the literal `"***"`. Recursion applies through nested maps. The body is **not** redacted — developers format the body without secrets.
+
+The pattern list is shared with config-spec via `config-spec/_meta/secret_patterns.yaml`.
+
+## Sampling
+
+Phase 1: severity-based filter (per-logger and per-sink `min_severity`). Phase 2 introduces processor-based samplers (`sampler_rate`, `sampler_trace_ratio`). Tail-based sampling is delegated to the OTel Collector and is **not** part of the contract.
+
+## Self-observability
+
+Phase 2 mandates self-metrics — `records_emitted_total`, `records_dropped_total`, `sink_flush_duration_seconds`, `sink_errors_total`, `reconfigure_total`, `active_loggers_gauge`, `buffer_depth`. Phase 1 makes them optional. The metric names follow OTel semantic conventions (`otel.logger.*` prefix).
+
+## Async and shutdown
+
+Non-blocking emit is the contract: `logger.info(...)` returns immediately, sinks batch records, the caller never waits for I/O. Overflow strategy is configurable per sink (`drop_oldest` default, `drop_newest`, `block`).
+
+Shutdown protocol: `flush(timeout) -> FlushResult { success, partial, failed_sinks: [{sink_id, error}] }` and `close()`. Applications should call `close()` in a shutdown hook (atexit / SIGTERM / FastAPI lifespan).
+
+## Conformance
+
+A binding is conformant with v1.0 when it passes four test categories: wire-format roundtrip (every declared format), context propagation (trace_id / span_id from OTel context), semantic conventions (operations / typed events / progress / AI-agent extension), Phase 1 sinks (non-blocking emit, drop accounting, flush + close).
+
+A binding may publish under a `phase1-partial` tag if it covers dagstack JSON-lines only (no OTLP wires), context propagation, the §5 operations subset, and Phase 1 sinks.
+
+## What is out of scope
+
+- Tracing and metrics SDKs — use OTel directly.
+- Tail-based sampling — Collector / backend concern.
+- Body pattern scanning (regex over `body` for catch-all secret detection) — expensive, brittle.
+- Log-based alerting rules — backend concern.
+- Multi-tenant log isolation — infrastructure concern.
+
+## See also
+
+- The [Concepts](/docs/concepts/severity) section — applied descriptions of every decision above.
+- The [Guides](/docs/guides/configure) section — practical task walkthroughs.
+- The [LogRecord reference](/docs/reference/log-record) — full field table.
+- [The full normative ADR-0001](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md) — every edge case, conformance fixture, and post-v1.0 backlog item.

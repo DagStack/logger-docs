@@ -1,0 +1,90 @@
+---
+sidebar_position: 3
+title: Error model
+description: How the logger reports configuration and emit failures — exceptions raised by configure(), exceptions swallowed inside emit(), and the diagnostic channel.
+slug: /reference/errors
+---
+
+# Error model
+
+The logger surfaces errors at two boundaries: **configuration time** (raises) and **emit time** (swallows + diagnostics). Sink lifecycle errors flow through `flush()` / `close()` return values.
+
+## Configuration errors
+
+`configure()` raises if the supplied arguments are invalid. The Python binding raises `ValueError`; the TypeScript binding throws `RangeError` (for out-of-range severity) or a generic `Error` for unsupported types; the Go binding panics from the `WithRootLevel` / `WithPerLoggerLevels` option constructors when the severity name does not resolve (callers typically `recover()` at startup).
+
+| Trigger | Python exception | Why |
+|---|---|---|
+| `severity_number` outside `[1, 24]` | `ValueError("severity_number {N} not in [1, 24]")` | OTel range invariant |
+| Unknown severity name (e.g., `"VERBOSE"`) | `ValueError("unknown severity name 'VERBOSE'; expected one of [...]")` | Severity strings are a fixed set |
+| Sink type unsupported by `build_sinks` | `ValueError("unsupported sink type: 'foo'")` | The factory is the application's gate |
+
+## Emit-time errors
+
+Per spec §3.6 and §13, the logger **does not raise** on emit. The contract is:
+
+- A malformed attribute (non-`Value` type) is dropped or coerced; the rest of the record proceeds.
+- A sink error during `emit` is **isolated** — the offending sink swallows the exception, and the remaining sinks keep delivering. The record is not retried at the logger level.
+- Buffer-overflow drops (Phase 2 async sinks) are accounted in the `dropped_total{sink_id}` counter; the application sees no exception.
+
+The Python binding catches every exception inside the `_emit` fan-out:
+
+```python
+# dagstack/logger-python: src/dagstack/logger/logger.py — sketch of the production behaviour.
+for sink in self.effective_sinks():
+    try:
+        sink.emit(record)
+    except Exception:
+        # Sink failure is isolated — the remaining sinks keep emitting.
+        # Phase 2+: report on the dagstack.logger.internal channel.
+        continue
+```
+
+This guarantees that one broken sink (a closed file, a misconfigured remote endpoint) does not silence the others or crash the caller.
+
+## Exception-aware logging
+
+Use `logger.exception(err, attributes=...)` to log an error with OTel `exception.*` attributes populated:
+
+```python
+try:
+    process_order(order_id)
+except OrderValidationError as err:
+    logger.exception(err, attributes={"order.id": order_id})
+```
+
+The record is emitted at `ERROR` severity (`severity_number = 17`) with three additional attributes:
+
+| Attribute | Value |
+|---|---|
+| `exception.type` | The exception's qualified type name (`"OrderValidationError"`). |
+| `exception.message` | `str(err)`. |
+| `exception.stacktrace` | The formatted traceback as a UTF-8 string. |
+
+The format is OTel-semconv compatible — backends recognising `exception.*` (Datadog, Honeycomb, Sentry) parse the attributes natively.
+
+## The diagnostic channel — `dagstack.logger.internal`
+
+The logger reserves the named logger `dagstack.logger.internal` for its own diagnostics: sink failures, buffer overflow, dropped records, schema validation failures, async callback errors. The isolation contract (spec §7.4):
+
+- `dagstack.logger.internal` does **not** inherit sinks from the root by default — preventing an infinite loop if the root's sinks are themselves broken.
+- The binding configures a minimal dedicated sink for it (stderr JSON-lines, direct write, no background worker) so the diagnostic reaches the operator even when the main pipeline is broken.
+- Records on `dagstack.logger.internal` skip the LogProcessor chain (no redaction, no sampling) for minimum delivery guarantee.
+
+The Python binding's Phase 1 implementation does **not yet route diagnostics through `dagstack.logger.internal`**; the swallowed-exception pattern in `_emit` simply drops the error. Wiring of the internal channel is on the v0.2 roadmap.
+
+## Shutdown errors
+
+`flush(timeout)` and `close()` are best-effort:
+
+- `flush(timeout)` walks every effective sink and calls its `flush(timeout)`. A failure inside one sink's flush is swallowed (the spec allows it); the call continues to the next sink.
+- `close()` walks every effective sink and calls its `close()`. Idempotent — calling `close()` a second time is a no-op.
+
+The spec defines a richer `FlushResult { success, partial, failed_sinks: [{sink_id, error}] }` shape; Phase 1 of the Python binding returns `None` from both methods. Phase 2 will adopt the structured result so application shutdown handlers can act on per-sink failure information.
+
+## See also
+
+- [Sinks](../concepts/sinks) — what `flush` and `close` do per sink.
+- [Configure the logger](../guides/configure) — graceful-shutdown pattern.
+- [Implement a custom sink](../guides/custom-sink) — error-handling expectations for sink authors.
+- [ADR-0001 §3.6 / §13 (full normative text)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#36-error-handling).

@@ -1,0 +1,89 @@
+---
+sidebar_position: 7
+title: Форматы передачи
+description: Три формата передачи — OTLP protobuf, OTLP JSON, dagstack JSON-lines — разделяют один внутренний LogRecord. Правила кодирования временных меток, trace id и регистра ключей.
+slug: /concepts/wire-formats
+---
+
+# Форматы передачи
+
+Внутренняя форма `LogRecord` идентична во всех биндингах. Различается **wire-кодирование** — то, как запись сериализуется в поток байт, попадающий в приёмник. Спека определяет три формата передачи; приёмники выбирают один (или несколько) согласно своему объявленному выводу.
+
+## Три формата
+
+| Формат | Используется в | Регистр | Временные метки | trace_id / span_id |
+|---|---|---|---|---|
+| **OTLP protobuf** | `OTLPSink` (gRPC, HTTP/protobuf) | (бинарный) | `fixed64` | `bytes(16)` / `bytes(8)` |
+| **OTel JSON** | `OTLPSink` (HTTP/JSON), `FileSink` режим OTLP, `ConsoleSink` режим JSON | camelCase | десятичная строка наносекунд | строчные 32-hex / 16-hex |
+| **dagstack JSON-lines** | `FileSink` режим по умолчанию, `ConsoleSink` wire-режим | snake_case | int64 наносекунд | строчные 32-hex / 16-hex |
+
+OTel-форматы обязательны для совместимости с observability-бэкендами разных вендоров; dagstack JSON-lines — это snake_case-вариант, согласованный с соглашениями [config-spec Canonical JSON](https://config.dagstack.dev/docs/concepts/sources); его используют приёмники, нацеленные на внутренние log-конвейеры dagstack.
+
+## OTLP protobuf
+
+Нативный wire OTel — те же байты, что OTel SDK говорит OTel-коллектору. Используется запланированным `OTLPSink` (Phase 2). Имена полей совпадают со схемой proto:
+
+- `time_unix_nano`, `observed_time_unix_nano` — `fixed64`.
+- `trace_id` — `bytes` (ровно 16 байт).
+- `span_id` — `bytes` (ровно 8 байт).
+- `severity_number` — int в диапазоне `1..24`.
+- `body` и `attributes` используют рекурсивный sum-тип `AnyValue` из OTel.
+
+Сериализация делегируется protobuf-рантайму каждого языка (`google.protobuf` в Python, `protobufjs` в TS, `google.golang.org/protobuf` в Go). Формат бинарный и не предназначен для чтения человеком; используй экспортёр `logging` в OTel-коллекторе или `otlp-debug-exporter`, чтобы посмотреть его содержимое.
+
+## OTel JSON
+
+Рекомендованное OTel JSON-кодирование (по protobuf JSON-спецификации для 64-битных целых). Используется `OTLPSink` поверх HTTP+JSON, `FileSink` в режиме OTLP и `ConsoleSink` в режиме JSON.
+
+Правила кодирования ключей:
+
+- **camelCase**-ключи: `timeUnixNano`, `observedTimeUnixNano`, `severityNumber`, `severityText`, `traceId`, `spanId`, `traceFlags`.
+- **Временные метки как десятичные строки.** Значение `fixed64`, превышающее `2^53`, нельзя представить как JSON-число без потери точности, поэтому OTel JSON оборачивает его в строку: `"timeUnixNano": "1729800000000000000"`.
+- **`trace_id` / `span_id` как строчные hex-строки.** 32 hex-символа для `trace_id` (с ведущими нулями), 16 для `span_id`.
+- **`body` и `attributes`** используют форму OTel JSON `AnyValue` — `{"stringValue": "..."}`, `{"intValue": 42}`, `{"kvlistValue": {"values": [{"key": ..., "value": ...}, ...]}}`.
+
+Бэкенды вроде OpenTelemetry Collector, Honeycomb и Datadog парсят OTel JSON нативно.
+
+## dagstack JSON-lines
+
+snake_case-вариант для приёмников, нацеленных на внутренние конвейеры и инструменты dagstack. Формат — **Canonical JSON** (рекурсивно отсортированные ключи, UTF-8, LF, без хвостового перевода строки) — байт-в-байт идентичен между биндингами, подходит для хеширования и детерминированного сравнения.
+
+Отличия от OTel JSON:
+
+- **snake_case**-ключи: `time_unix_nano`, `observed_time_unix_nano`, `severity_number`, `severity_text`, `trace_id`, `span_id`, `trace_flags`.
+- **Временные метки как целые числа.** Canonical JSON допускает int64 как нативное число; потребители должны корректно обрабатывать bigint при чтении формата (чтобы 64-битные значения наносекунд не теряли точность в JavaScript).
+- **`trace_id` / `span_id` как строчные hex-строки** (как и в OTel JSON).
+- **`body` и `attributes`** используют естественное JSON-кодирование для `Value` — строки, числа, логические значения, `null`, массивы, объекты. Без обёртки `AnyValue`.
+
+Пример записи:
+
+```json
+{"attributes":{"order.id":1234,"request.id":"req-abc"},"body":"order placed","instrumentation_scope":{"name":"order_service.checkout","version":"1.0.0"},"resource":{"attributes":{"service.name":"order-service"}},"severity_number":9,"severity_text":"INFO","span_id":"00f067aa0ba902b7","time_unix_nano":1729800000000000000,"trace_flags":1,"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736"}
+```
+
+`FileSink` в Python в режиме по умолчанию выдаёт ровно этот формат, по одной записи на строку, без хвостового перевода строки в конце файла.
+
+## Pretty для человека (только для презентации)
+
+`ConsoleSink(mode="pretty")` производит цветной текст для интерактивного TTY — временную метку, тег уровня, имя scope, тело сообщения, сводку атрибутов. Это **не формат передачи**; парсер не должен уметь восстанавливать `LogRecord` из pretty-вывода. Pretty-режим — только для глаз разработчика; CI-логи, stdout контейнера и файловые приёмники всегда используют формат, поддающийся парсингу.
+
+## Владение `observed_time_unix_nano`
+
+Источник записи (путь emit биндинга) оставляет `observed_time_unix_nano = null`. Приёмник **заполняет** это поле на этапе приёма, если оно пустое, прямо перед сериализацией. Это гарантирует, что файл и OTLP-вывод всегда несут временную метку приёма; в in-memory-конвейере (`InMemorySink`) обе временные метки могут совпадать.
+
+## Валидация
+
+Conformance-набор (спека §14.1) тестирует каждый формат передачи через цикл emit → parse → re-emit:
+
+1. Собрать репрезентативный `LogRecord` (по одному на каждый уровень, по одному на каждый основной `event.domain`, один с применённым маскированием, один с полным контекстом).
+2. Сериализовать в проверяемый формат.
+3. Распарсить байты обратно в `LogRecord`.
+4. Сериализовать заново и сравнить байт-в-байт с первым emit.
+
+Для формата dagstack JSON-lines применяются правила Canonical JSON. Несоответствующий вход (неизвестный `severity_number`, отсутствующий `instrumentation_scope`, плохо сформированный `trace_id`) отвергается на этапе парсинга.
+
+## См. также
+
+- [Поля LogRecord](../reference/log-record) — полный список полей с типами.
+- [Приёмники](./sinks) — какие приёмники в каком формате выдают.
+- [ADR-0001 §1 (полный нормативный текст)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#1-log-data-model-wire-format).

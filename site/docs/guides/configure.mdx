@@ -1,0 +1,427 @@
+---
+sidebar_position: 1
+title: Configure the logger
+description: Bootstrap the global logger from an application config — root level, sinks, per-logger overrides, resource attributes. Integration with dagstack/config.
+slug: /guides/configure
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Configure the logger
+
+The logger is **stateless until configured**. The `configure()` call (per spec §9.2) sets up the root logger, attaches sinks, applies per-logger severity overrides, and seeds the OTel `Resource` with process-level attributes. Run it once at application startup, before any business code calls `Logger.get(name)`.
+
+## Step 1. Decide the configuration source
+
+In a typical dagstack application, the logger reads its section from an `app-config.yaml` parsed by `dagstack/config`. The `logger-python` package itself does **not** depend on `config-python` — the application extracts the `logging:` section from its `Config`, dumps it to a dict, and passes the values to `configure()`. This keeps the two libraries independent and avoids circular dependencies.
+
+A canonical YAML section looks like this:
+
+```yaml title="app-config.yaml"
+logging:
+  level: ${LOG_LEVEL:-INFO}
+
+  resource:
+    service.name: ${SERVICE_NAME:-order-service}
+    service.version: ${SERVICE_VERSION:-dev}
+    deployment.environment: ${DAGSTACK_ENV:-development}
+
+  loggers:
+    httpx: WARN
+    urllib3: WARN
+    order_service.checkout: DEBUG
+
+  sinks:
+    - type: console
+      mode: ${LOG_CONSOLE_MODE:-auto}
+      min_severity: ${LOG_LEVEL:-INFO}
+    - type: file
+      path: /var/log/order-service.jsonl
+      max_bytes: 100000000
+      keep: 10
+      min_severity: INFO
+```
+
+The fields above match the `LoggerSchema` from spec §9.2; bindings emit a native schema (Pydantic, zod, Go struct) that validates the section before it reaches the logger.
+
+## Step 2. Build sinks from the config
+
+Convert each sink entry into a binding-native sink instance, then pass the list to `configure()`:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import ConsoleSink, FileSink, configure
+
+
+    def build_sinks(sink_specs: list[dict]) -> list:
+        sinks = []
+        for spec in sink_specs:
+            kind = spec["type"]
+            if kind == "console":
+                sinks.append(ConsoleSink(
+                    mode=spec.get("mode", "auto"),
+                    min_severity=_resolve_severity(spec.get("min_severity", "INFO")),
+                ))
+            elif kind == "file":
+                sinks.append(FileSink(
+                    path=spec["path"],
+                    max_bytes=spec.get("max_bytes", 0),
+                    keep=spec.get("keep", 0),
+                    min_severity=_resolve_severity(spec.get("min_severity", "INFO")),
+                ))
+            else:
+                raise ValueError(f"unsupported sink type: {kind!r}")
+        return sinks
+
+
+    def _resolve_severity(value):
+        # configure() also accepts these strings directly; this helper is
+        # for sinks where the constructor expects an int.
+        return {"TRACE": 1, "DEBUG": 5, "INFO": 9, "WARN": 13, "ERROR": 17, "FATAL": 21}[value.upper()]
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { ConsoleSink, FileSink, type Sink } from "@dagstack/logger";
+
+    interface SinkSpec {
+        type: string;
+        mode?: "auto" | "json" | "pretty";
+        path?: string;
+        max_bytes?: number;
+        keep?: number;
+        min_severity?: number | string;
+    }
+
+    const SEVERITY: Record<string, number> = {
+        TRACE: 1, DEBUG: 5, INFO: 9, WARN: 13, ERROR: 17, FATAL: 21,
+    };
+
+    function resolveSeverity(value: number | string | undefined): number {
+        if (value === undefined) return 9;
+        if (typeof value === "number") return value;
+        return SEVERITY[value.toUpperCase()] ?? 9;
+    }
+
+    export function buildSinks(specs: SinkSpec[]): Sink[] {
+        return specs.map((spec) => {
+            if (spec.type === "console") {
+                return new ConsoleSink({
+                    mode: spec.mode ?? "auto",
+                    minSeverity: resolveSeverity(spec.min_severity),
+                });
+            }
+            if (spec.type === "file") {
+                if (!spec.path) throw new Error("file sink requires path");
+                return new FileSink(spec.path, {
+                    maxBytes: spec.max_bytes ?? 0,
+                    keep: spec.keep ?? 0,
+                    minSeverity: resolveSeverity(spec.min_severity),
+                });
+            }
+            throw new Error(`unsupported sink type: ${spec.type}`);
+        });
+    }
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    package bootstrap
+
+    import (
+        "fmt"
+        "strings"
+
+        "go.dagstack.dev/logger"
+    )
+
+    type SinkSpec struct {
+        Type        string
+        Mode        string
+        Path        string
+        MaxBytes    int64
+        Keep        int
+        MinSeverity string
+    }
+
+    var severityNames = map[string]int{
+        "TRACE": int(logger.SeverityTrace),
+        "DEBUG": int(logger.SeverityDebug),
+        "INFO":  int(logger.SeverityInfo),
+        "WARN":  int(logger.SeverityWarn),
+        "ERROR": int(logger.SeverityError),
+        "FATAL": int(logger.SeverityFatal),
+    }
+
+    func resolveSeverity(name string) int {
+        if name == "" {
+            return int(logger.SeverityInfo)
+        }
+        if n, ok := severityNames[strings.ToUpper(name)]; ok {
+            return n
+        }
+        return int(logger.SeverityInfo)
+    }
+
+    func BuildSinks(specs []SinkSpec) ([]logger.Sink, error) {
+        out := make([]logger.Sink, 0, len(specs))
+        for _, s := range specs {
+            switch s.Type {
+            case "console":
+                mode := logger.ConsoleAuto
+                switch s.Mode {
+                case "json":
+                    mode = logger.ConsoleJSON
+                case "pretty":
+                    mode = logger.ConsolePretty
+                }
+                out = append(out, logger.NewConsoleSink(mode, nil, resolveSeverity(s.MinSeverity)))
+            case "file":
+                fs, err := logger.NewFileSink(s.Path, s.MaxBytes, s.Keep, resolveSeverity(s.MinSeverity))
+                if err != nil {
+                    return nil, fmt.Errorf("file sink %q: %w", s.Path, err)
+                }
+                out = append(out, fs)
+            default:
+                return nil, fmt.Errorf("unsupported sink type: %q", s.Type)
+            }
+        }
+        return out, nil
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## Step 3. Call `configure()` at startup
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.config import Config
+    from dagstack.logger import Logger, configure
+
+
+    def bootstrap():
+        config = Config.load("app-config.yaml")
+        log_section = config.get("logging", default={})
+
+        configure(
+            root_level=log_section.get("level", "INFO"),
+            sinks=build_sinks(log_section.get("sinks", [])),
+            per_logger_levels=log_section.get("loggers", {}),
+            resource_attributes=log_section.get("resource", {}),
+        )
+
+        # Now business code can resolve loggers by name.
+        Logger.get("order_service.bootstrap").info("logger configured")
+
+
+    if __name__ == "__main__":
+        bootstrap()
+        run_application()
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { Logger, configure } from "@dagstack/logger";
+    import { buildSinks } from "./bootstrap";
+    import { loadConfig } from "./config"; // your app's config loader
+
+    export async function bootstrap() {
+        const config = await loadConfig("app-config.yaml");
+        const log = config.logging ?? {};
+
+        configure({
+            rootLevel: log.level ?? "INFO",
+            sinks: buildSinks(log.sinks ?? []),
+            perLoggerLevels: log.loggers ?? {},
+            resourceAttributes: log.resource ?? {},
+        });
+
+        // Now business code can resolve loggers by name.
+        Logger.get("order_service.bootstrap").info("logger configured");
+    }
+
+    if (require.main === module) {
+        bootstrap().then(runApplication);
+    }
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    package main
+
+    import (
+        "go.dagstack.dev/logger"
+    )
+
+    func bootstrap() error {
+        cfg, err := loadConfig("app-config.yaml")
+        if err != nil {
+            return err
+        }
+
+        sinks, err := BuildSinks(cfg.Logging.Sinks)
+        if err != nil {
+            return err
+        }
+
+        // Build per-logger level map from the parsed config.
+        perLogger := make(map[string]any, len(cfg.Logging.Loggers))
+        for name, level := range cfg.Logging.Loggers {
+            perLogger[name] = level
+        }
+
+        logger.Configure(
+            logger.WithRootLevel(cfg.Logging.Level),
+            logger.WithSinks(sinks...),
+            logger.WithPerLoggerLevels(perLogger),
+            logger.WithResourceAttributes(cfg.Logging.Resource),
+        )
+
+        logger.Get("order_service.bootstrap").Info("logger configured", nil)
+        return nil
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## What `configure()` does
+
+Per spec §9.2 the call:
+
+1. Resolves `root_level` (string `"INFO"` or numeric `9`) into a severity number and applies it to the root logger.
+2. Replaces the root logger's sinks with the supplied list. Children of the root inherit the sinks unless overridden.
+3. For each entry in `per_logger_levels`, applies a severity override to that named logger. The override sticks even after children are created.
+4. If `resource_attributes` is non-empty, builds a `Resource` and attaches it to the root logger; every record inherits it (unless a child logger sets its own `Resource`).
+
+The call is idempotent — calling `configure()` again replaces the previous setup atomically. In-flight records emitted by other threads complete against the old configuration before the new sinks take over.
+
+## Step 4. Per-logger overrides
+
+The `per_logger_levels` argument silences noisy third-party loggers and elevates the verbosity of a specific module:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    configure(
+        root_level="INFO",
+        sinks=[ConsoleSink(mode="auto")],
+        per_logger_levels={
+            "httpx": "WARN",
+            "urllib3": "WARN",
+            "order_service.checkout": "DEBUG",
+        },
+        resource_attributes={"service.name": "order-service"},
+    )
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    configure({
+        rootLevel: "INFO",
+        sinks: [new ConsoleSink({ mode: "auto" })],
+        perLoggerLevels: {
+            axios: "WARN",
+            undici: "WARN",
+            "order_service.checkout": "DEBUG",
+        },
+        resourceAttributes: { "service.name": "order-service" },
+    });
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    logger.Configure(
+        logger.WithRootLevel("INFO"),
+        logger.WithSinks(logger.NewConsoleSink(logger.ConsoleAuto, nil, 1)),
+        logger.WithPerLoggerLevels(map[string]any{
+            "net/http":                "WARN",
+            "order_service.checkout":  "DEBUG",
+        }),
+        logger.WithResourceAttributes(logger.Attrs{"service.name": "order-service"}),
+    )
+    ```
+  </TabItem>
+</Tabs>
+
+The override applies even if `Logger.get("order_service.checkout")` is called after `configure()` — the registry's lookup looks up the per-logger-level map before returning the cached or freshly-created logger.
+
+## Common pitfalls
+
+- **Calling `configure()` after the first emit.** Records emitted before the call go to the bootstrap default (a plain `ConsoleSink` in pretty mode, severity floor `INFO`). Call `configure()` as the first line of your startup function.
+- **Forgetting `service.name`.** OTel observability backends key all records by `Resource.service.name`; without it, your records land in an unattributed bucket. Always set it via `resource_attributes`.
+- **Two different `service.version`s in two replicas.** Set `service.version` from the build's git SHA or release tag, not from a runtime variable that drifts between replicas.
+- **Sink severity below logger severity.** The logger applies its own `min_severity` filter before fan-out. If `root_level=INFO` and a sink declares `min_severity=DEBUG`, the sink still receives only `INFO+` records — the logger drops `DEBUG` early.
+
+## Step 5. Graceful shutdown (recommended)
+
+Register an atexit / signal handler that flushes the logger:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    import atexit
+    from dagstack.logger import Logger
+
+    @atexit.register
+    def shutdown_logger():
+        Logger.get("").flush(timeout=5.0)
+        Logger.get("").close()
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { Logger } from "@dagstack/logger";
+
+    async function shutdownLogger(): Promise<void> {
+        const root = Logger.get("");
+        await root.flush(5000);
+        await root.close();
+    }
+
+    process.on("SIGTERM", async () => {
+        await shutdownLogger();
+        process.exit(0);
+    });
+    process.on("SIGINT", async () => {
+        await shutdownLogger();
+        process.exit(0);
+    });
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    package main
+
+    import (
+        "os"
+        "os/signal"
+        "syscall"
+
+        "go.dagstack.dev/logger"
+    )
+
+    func waitForShutdown() {
+        c := make(chan os.Signal, 1)
+        signal.Notify(c, syscall.SIGTERM, syscall.SIGINT)
+        <-c
+
+        root := logger.Get("")
+        _, _ = root.Flush(5.0)
+        _ = root.Close()
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+Without graceful shutdown, buffered records (Phase 2 sinks with background workers) may be lost on process exit. Phase 1 sinks (`ConsoleSink`, `FileSink`, `InMemorySink`) write synchronously, so the loss window is small but non-zero.
+
+## See also
+
+- [Sinks](../concepts/sinks) — what each sink configures.
+- [Severity](../concepts/severity) — bucket mapping and the constants.
+- [LogRecord fields](../reference/log-record) — what the configured logger emits.
+- [ADR-0001 §9 (full normative text)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#9-configuration-via-config-spec).

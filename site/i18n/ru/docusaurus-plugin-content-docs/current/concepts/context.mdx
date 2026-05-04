@@ -1,0 +1,108 @@
+---
+sidebar_position: 3
+title: Проброс контекста
+description: Как trace_id, span_id и записи W3C Baggage автоматически добавляются в каждый LogRecord — и как от этого отказаться для fire-and-forget отправок.
+slug: /concepts/context
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Проброс контекста
+
+Логгер автоматически добавляет в каждый `LogRecord` записи W3C Trace Context и W3C Baggage. Корреляция трассировок и логов работает «из коробки»: когда бэкенд группирует записи по `trace_id`, он видит каждую строку лога, отправленную внутри соответствующего span.
+
+## Что добавляется
+
+При каждом emit логгер читает активный контекст OpenTelemetry и заполняет:
+
+| Поле | Источник | Кодирование на wire |
+|---|---|---|
+| `trace_id` | OTel `Context` → `SpanContext.TraceId` | 16 байт (lowercase 32-hex в JSON) |
+| `span_id` | OTel `Context` → `SpanContext.SpanId` | 8 байт (lowercase 16-hex в JSON) |
+| `trace_flags` | OTel `Context` → `SpanContext.TraceFlags` | uint8 (бит sampled и т.п.) |
+| `attributes["tenant.id"]` | W3C Baggage → запись `tenant.id` | унаследованная строка |
+| `attributes["request.id"]` | W3C Baggage → запись `request.id` | унаследованная строка |
+| `attributes["user.id"]` | W3C Baggage → запись `user.id` | унаследованная строка |
+
+Другие записи Baggage (реестр будет жить в `_meta/baggage_keys.yaml` в v1.1; в биндингах v1.0 список ключей поставляется инлайн) тоже добавляются. Если запись отправляется вне любого активного контекста, `trace_id` и `span_id` остаются `None`, а не нулями — бэкенды отличают «нет трассировки» от «трассировка с нулевыми id».
+
+## Как это работает
+
+Python-биндинг использует Context API OTel напрямую: `opentelemetry.context.get_current()` плюс `opentelemetry.trace.get_current_span()`. TypeScript-биндинг использует `trace.getActiveSpan()` плюс `propagation.getActiveBaggage()` из `@opentelemetry/api`. Go-биндинг читает явный аргумент `context.Context`, передаваемый в `*Ctx`-методы уровней, и вызывает `oteltrace.SpanFromContext(ctx)` из `go.opentelemetry.io/otel/trace`.
+
+Каждый биндинг работает с одним и тем же источником — параллельной абстракции «dagstack-контекст» нет. Если ты инструментируешь приложение OTel-span (через `OpenTelemetry SDK` в Python, `@opentelemetry/sdk-node` в TS, `go.opentelemetry.io/otel` в Go), проброс trace context работает сам.
+
+## Установка записей baggage
+
+W3C Baggage — стандартный для OTel способ пробрасывать сквозные атрибуты через границы сервисов. Установка `tenant.id` один раз в точке входа запроса приводит к тому, что каждая нижестоящая строка лога несёт это значение, в том числе через HTTP-вызовы (когда подключены OTel HTTP-инструментации).
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from opentelemetry import baggage, context
+
+    ctx = baggage.set_baggage("tenant.id", "acme-corp")
+    token = context.attach(ctx)
+    try:
+        logger.info("processing request")
+        # Отправленная запись несёт attributes={"tenant.id": "acme-corp", ...}
+        # плюс trace_id / span_id из активного span (если он есть).
+    finally:
+        context.detach(token)
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { context, propagation } from "@opentelemetry/api";
+
+    const baggage = propagation
+        .createBaggage()
+        .setEntry("tenant.id", { value: "acme-corp" });
+    const ctx = propagation.setBaggage(context.active(), baggage);
+
+    await context.with(ctx, async () => {
+        logger.info("processing request");
+        // Отправленная запись несёт attributes={"tenant.id": "acme-corp", ...}
+        // плюс trace_id / span_id из активного span (если он есть).
+    });
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    import (
+        "context"
+
+        "go.opentelemetry.io/otel/baggage"
+    )
+
+    member, _ := baggage.NewMember("tenant.id", "acme-corp")
+    bag, _ := baggage.New(member)
+    ctx := baggage.ContextWithBaggage(context.Background(), bag)
+
+    log.InfoCtx(ctx, "processing request", nil)
+    // Отправленная запись несёт trace_id / span_id из активного span (если он есть).
+    // Замечание: Go-биндинг в Phase 1 читает trace context из ctx;
+    // извлечение baggage включается флагом Phase 2 (см. DefaultBaggageKeys).
+    ```
+  </TabItem>
+</Tabs>
+
+## Отказ от проброса
+
+Для fire-and-forget отправок, которым не нужно подтягивать контекст вызывающего кода (редкий случай — обычно это heartbeat-метрика или audit-запись, которая не должна тащить активный tenant), спека определяет способ отключения:
+
+> `logger.withoutContext().info(...)` — возвращает дочерний логгер, который пропускает добавление trace и baggage. Отключение не наследуется дальше; потомки возвращённого логгера снова включают проброс по умолчанию.
+
+Python-биндинг предоставит это отключение как часть семейства `with_sinks` / scoped-override в Phase 2. В Phase 1 обходной путь — задавать только явные атрибуты и принимать тот факт, что активный trace context всё равно будет прочитан; если код отрабатывает вне любого span, `trace_id` не добавится.
+
+## А что с явным атрибутом по имени `trace_id`
+
+Спека резервирует `trace_id`, `span_id`, `trace_flags` как **типизированные поля верхнего уровня** `LogRecord`, а не как ключи атрибутов. Если приложение задаёт `attributes={"trace_id": "..."}` вручную, это значение попадает в `attributes` (в отдельный слот) и не перетирает поле `trace_id` верхнего уровня. Бэкенды различают их по структурному местоположению: типизированное поле — для корреляции OTel; атрибут — это данные приложения.
+
+## См. также
+
+- [Поля LogRecord](../reference/log-record) — полная структурная раскладка.
+- [Операции и типизированные события](./operations) — как идентификаторы операций сочетаются с trace id.
+- [Форматы передачи](./wire-formats) — кодирование `trace_id` / `span_id` для каждого формата.
+- [ADR-0001 §3.4 (полный нормативный текст)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#34-context-propagation-mandatory).

@@ -1,0 +1,167 @@
+---
+sidebar_position: 1
+title: Уровни
+description: Числовая шкала уровней 1–24, шесть канонических строк severity_text и таблица соответствия групп, по которой бэкенды фильтруют записи через точное совпадение.
+slug: /concepts/severity
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Уровни
+
+Логгер использует **нумерацию уровней OpenTelemetry** — целое число в диапазоне `1..24` — для `severity_number`, и ровно **одну из шести канонических строк** для `severity_text`. Два поля вместе позволяют бэкендам фильтровать как по числовому диапазону, так и по точному совпадению строки.
+
+## Зачем нужны два поля
+
+Числовое `severity_number` несёт детализацию (например, `INFO2 = 10`, `INFO3 = 11`); каноническое `severity_text` несёт группу (`"INFO"`). Бэкенды вроде Grafana, Honeycomb и Datadog фильтруют по точному совпадению `severity_text`, поэтому значение группы должно браться из фиксированного набора; иначе запрос вида `severity_text = "INFO"` молча пропустит записи `"INFO2"`. Числовое поле остаётся доступным для запросов вида `severity_number > 9 AND severity_number < 13`.
+
+## Таблица групп
+
+24 числовых значения отображаются на шесть канонических строк:
+
+| Диапазон `severity_number` | `severity_text` | Значение |
+|---|---|---|
+| 1–4 | `"TRACE"` | Детальная диагностика |
+| 5–8 | `"DEBUG"` | Отладочная информация |
+| 9–12 | `"INFO"` | Информационные записи (по умолчанию `INFO = 9`) |
+| 13–16 | `"WARN"` | Предупреждения |
+| 17–20 | `"ERROR"` | Ошибки, требующие внимания |
+| 21–24 | `"FATAL"` | Критические сбои уровня приложения |
+
+Базовые имена — `trace`, `debug`, `info`, `warn`, `error`, `fatal` со значениями `severity_number` `1, 5, 9, 13, 17, 21` соответственно. Промежуточные числа отправляются через универсальный метод `log(severity_number, ...)`; их группа вычисляется по таблице выше.
+
+## Вызов методов уровней
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import Logger
+
+    logger = Logger.get("order_service.checkout")
+
+    logger.trace("entering function", attributes={"args.order_id": 1234})
+    logger.debug("cache miss", attributes={"cache.key": "user:42"})
+    logger.info("order placed", attributes={"order.id": 1234})
+    logger.warn("retry triggered", attributes={"retry.attempt": 2})
+    logger.error("payment declined", attributes={"order.id": 1234})
+    logger.fatal("config invariant violated", attributes={"reason": "missing service.name"})
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { Logger } from "@dagstack/logger";
+
+    const logger = Logger.get("order_service.checkout");
+
+    logger.trace("entering function", { "args.order_id": 1234 });
+    logger.debug("cache miss", { "cache.key": "user:42" });
+    logger.info("order placed", { "order.id": 1234 });
+    logger.warn("retry triggered", { "retry.attempt": 2 });
+    logger.error("payment declined", { "order.id": 1234 });
+    logger.fatal("config invariant violated", { reason: "missing service.name" });
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    log := logger.Get("order_service.checkout")
+
+    log.Trace("entering function", logger.Attrs{"args.order_id": 1234})
+    log.Debug("cache miss", logger.Attrs{"cache.key": "user:42"})
+    log.Info("order placed", logger.Attrs{"order.id": 1234})
+    log.Warn("retry triggered", logger.Attrs{"retry.attempt": 2})
+    log.Error("payment declined", logger.Attrs{"order.id": 1234})
+    log.Fatal("config invariant violated", logger.Attrs{"reason": "missing service.name"})
+
+    // Используй *Ctx-варианты, когда ctx несёт активный OTel-span.
+    log.InfoCtx(ctx, "order placed", logger.Attrs{"order.id": 1234})
+    ```
+  </TabItem>
+</Tabs>
+
+Для промежуточного значения (`INFO2`, `DEBUG3`) используй универсальный метод `log` с явным `severity_number`:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    logger.log(11, "intermediate level", attributes={"phase": "warmup"})
+    # severity_number=11 → severity_text="INFO" (по-прежнему группа 9–12).
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    logger.log(11, "intermediate level", { phase: "warmup" });
+    // severity_number=11 → severity_text="INFO" (по-прежнему группа 9–12).
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    log.LogCtx(ctx, 11, "intermediate level", logger.Attrs{"phase": "warmup"})
+    // severity_number=11 → severity_text="INFO" (по-прежнему группа 9–12).
+    ```
+  </TabItem>
+</Tabs>
+
+## Константы
+
+Каждый биндинг экспортирует границы групп как языковые константы:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import Severity
+
+    assert int(Severity.TRACE) == 1
+    assert int(Severity.DEBUG) == 5
+    assert int(Severity.INFO) == 9
+    assert int(Severity.WARN) == 13
+    assert int(Severity.ERROR) == 17
+    assert int(Severity.FATAL) == 21
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { Severity } from "@dagstack/logger";
+
+    // Severity экспортируется как const-объект — типизированные числовые константы.
+    Severity.TRACE; // 1
+    Severity.DEBUG; // 5
+    Severity.INFO;  // 9
+    Severity.WARN;  // 13
+    Severity.ERROR; // 17
+    Severity.FATAL; // 21
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    import "go.dagstack.dev/logger"
+
+    // Типизированные константы Severity int.
+    _ = logger.SeverityTrace // 1
+    _ = logger.SeverityDebug // 5
+    _ = logger.SeverityInfo  // 9
+    _ = logger.SeverityWarn  // 13
+    _ = logger.SeverityError // 17
+    _ = logger.SeverityFatal // 21
+    ```
+  </TabItem>
+</Tabs>
+
+Каждый биндинг отдаёт одни и те же шесть констант — значения совпадают с нумерацией OTel и никогда не расходятся между языками. Запланированный `_meta/severity.yaml` (v1.1) станет источником истины, который биндинги будут заимствовать (vendoring); в биндингах v1.0 константы поставляются инлайн.
+
+## Соответствие другим системам
+
+| Источник | TRACE | DEBUG | INFO | WARN | ERROR | FATAL |
+|---|---|---|---|---|---|---|
+| OTel `severity_number` | 1–4 | 5–8 | 9–12 | 13–16 | 17–20 | 21–24 |
+| Python `logging` | — (нет встроенного) | 10 | 20 | 30 | 40 | 50 |
+| Go `slog` | — | -4 | 0 | 4 | 8 | — |
+| Syslog (RFC 5424) | 7 | 7 | 6 | 4 | 3 | 2/1/0 |
+
+Таблица соответствия будет жить в `_meta/severity.yaml` в spec-репозитории (v1.1; в биндингах v1.0 таблица поставляется инлайн). Полную таблицу смотри на странице [Справочник по уровням](../reference/severity-table).
+
+## См. также
+
+- [Поля LogRecord](../reference/log-record) — полный список полей с типами.
+- [Справочная таблица уровней](../reference/severity-table) — полное перечисление 24 строк.
+- [ADR-0001 §2 (полный нормативный текст)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#2-severity-levels).

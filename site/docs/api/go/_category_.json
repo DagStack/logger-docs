@@ -1,0 +1,11 @@
+{
+  "label": "Go",
+  "position": 3,
+  "collapsible": true,
+  "collapsed": true,
+  "link": {
+    "type": "generated-index",
+    "title": "Go API",
+    "description": "Reference for the public API of the go.dagstack.dev/logger package."
+  }
+}

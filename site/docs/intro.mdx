@@ -1,0 +1,293 @@
+---
+sidebar_position: 1
+title: Quick start
+description: Install dagstack/logger and emit your first structured LogRecord — severity, sinks, attributes, automatic context propagation in Python, TypeScript, Go.
+slug: /intro
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Quick start
+
+`dagstack/logger` is an OpenTelemetry-compatible structured logging contract for the dagstack ecosystem. It standardises:
+
+- **The wire format** — a LogRecord that matches the OTel Log Data Model v1.24.
+- **Severity** — the numeric range 1-24 with six canonical text values (`TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`).
+- **Sinks** — pluggable destinations that share one Sink contract (Phase 1 ships `ConsoleSink`, `FileSink`, `InMemorySink`).
+- **Context propagation** — `trace_id`, `span_id`, and W3C Baggage entries are injected into every record automatically.
+- **Redaction** — attribute values whose keys end in `_key`, `_secret`, `_token`, `_password`, `_passphrase`, or `_credentials` are masked at emit time.
+- **Scoped overrides** — a single agent run, test case, or audit endpoint can swap sinks for the duration of a block.
+- **AI-agent observability** — an optional convention pack with OTel GenAI conformance for LLM, tool, and retrieval observability.
+
+:::info Release status
+All three bindings ship Phase 1 v0.1.x: `dagstack-logger` on PyPI, `@dagstack/logger` on npmjs.org, and `go.dagstack.dev/logger` (a vanity URL backed by `github.com/dagstack/logger-go`).
+:::
+
+## Installation
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```bash
+    pip install dagstack-logger
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```bash
+    npm install @dagstack/logger
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```bash
+    go get go.dagstack.dev/logger
+    ```
+  </TabItem>
+</Tabs>
+
+## Your first log line
+
+Bootstrap the global logger once at application startup, then call `Logger.get(name)` from anywhere in the codebase:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import Logger, ConsoleSink, configure
+
+    configure(
+        root_level="INFO",
+        sinks=[ConsoleSink(mode="auto")],
+        resource_attributes={"service.name": "order-service"},
+    )
+
+    logger = Logger.get("order_service.api", version="1.0.0")
+    logger.info("request received", attributes={"request.id": "req-abc", "user.id": 42})
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { Logger, ConsoleSink, configure } from "@dagstack/logger";
+
+    configure({
+        rootLevel: "INFO",
+        sinks: [new ConsoleSink({ mode: "auto" })],
+        resourceAttributes: { "service.name": "order-service" },
+    });
+
+    const logger = Logger.get("order_service.api", "1.0.0");
+    logger.info("request received", { "request.id": "req-abc", "user.id": 42 });
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    import (
+        "go.dagstack.dev/logger"
+    )
+
+    logger.Configure(
+        logger.WithRootLevel("INFO"),
+        logger.WithSinks(logger.NewConsoleSink(logger.ConsoleAuto, nil, 1)),
+        logger.WithResourceAttributes(logger.Attrs{"service.name": "order-service"}),
+    )
+
+    log := logger.GetVersioned("order_service.api", "1.0.0")
+    log.Info("request received", logger.Attrs{"request.id": "req-abc", "user.id": 42})
+    ```
+  </TabItem>
+</Tabs>
+
+`ConsoleSink(mode="auto")` chooses pretty coloured output when stderr is a TTY and JSON-lines otherwise (so containerised stdout capture, `jq`, and `fluent-bit` see structured records, while a developer's terminal stays readable).
+
+## Adding sinks
+
+The `configure()` call accepts a list of sinks. Phase 1 ships three:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import ConsoleSink, FileSink, InMemorySink, configure
+
+    configure(
+        root_level="INFO",
+        sinks=[
+            ConsoleSink(mode="json"),
+            FileSink("/var/log/order-service.jsonl", max_bytes=100_000_000, keep=10),
+        ],
+        resource_attributes={
+            "service.name": "order-service",
+            "service.version": "1.0.0",
+            "deployment.environment": "production",
+        },
+    )
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { ConsoleSink, FileSink, InMemorySink, configure } from "@dagstack/logger";
+
+    configure({
+        rootLevel: "INFO",
+        sinks: [
+            new ConsoleSink({ mode: "json" }),
+            new FileSink("/var/log/order-service.jsonl", { maxBytes: 100_000_000, keep: 10 }),
+        ],
+        resourceAttributes: {
+            "service.name": "order-service",
+            "service.version": "1.0.0",
+            "deployment.environment": "production",
+        },
+    });
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    fileSink, err := logger.NewFileSink("/var/log/order-service.jsonl", 100_000_000, 10, 1)
+    if err != nil {
+        // handle file open error
+    }
+
+    logger.Configure(
+        logger.WithRootLevel("INFO"),
+        logger.WithSinks(
+            logger.NewConsoleSink(logger.ConsoleJSON, nil, 1),
+            fileSink,
+        ),
+        logger.WithResourceAttributes(logger.Attrs{
+            "service.name":           "order-service",
+            "service.version":        "1.0.0",
+            "deployment.environment": "production",
+        }),
+    )
+    ```
+  </TabItem>
+</Tabs>
+
+`FileSink` writes Canonical JSON-lines and rotates by file size; `InMemorySink` is a ring buffer for tests. Each sink applies its own `min_severity` filter independently of the others (see [Sinks](./concepts/sinks)).
+
+## Logging exceptions
+
+Use the `exception` method to capture an active error with OTel `exception.*` attributes:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    try:
+        process_order(order_id)
+    except OrderValidationError as err:
+        logger.exception(err, attributes={"order.id": order_id})
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    try {
+        await processOrder(orderId);
+    } catch (err) {
+        logger.exception(err, { attributes: { "order.id": orderId } });
+    }
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    if err := processOrder(ctx, orderID); err != nil {
+        log.ExceptionCtx(ctx, err, nil, logger.Attrs{"order.id": orderID})
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+The record is emitted at `ERROR` severity. Attributes `exception.type`, `exception.message`, `exception.stacktrace` are populated automatically per the OTel `exception.*` semantic conventions.
+
+## Capturing logs in tests
+
+Use `InMemorySink` plus a scoped override to capture only the records emitted inside a block:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import InMemorySink, Logger
+
+    sink = InMemorySink(capacity=100)
+    logger = Logger.get("test_module")
+
+    with logger.scope_sinks([sink]):
+        run_business_logic()
+
+    records = sink.records()
+    assert any(r.body == "operation completed" for r in records)
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { InMemorySink, Logger } from "@dagstack/logger";
+
+    const sink = new InMemorySink({ capacity: 100 });
+    const logger = Logger.get("test_module");
+
+    await logger.scopeSinks([sink], async (scoped) => {
+        await runBusinessLogic();
+    });
+
+    const records = sink.records();
+    if (!records.some((r) => r.body === "operation completed")) {
+        throw new Error("expected record not captured");
+    }
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    sink := logger.NewInMemorySink(100, 1)
+    log := logger.Get("test_module")
+
+    err := log.ScopeSinks(ctx, []logger.Sink{sink}, func(ctx context.Context) error {
+        runBusinessLogic(ctx)
+        return nil
+    })
+    if err != nil {
+        // handle
+    }
+
+    records := sink.Records()
+    // assert any record's Body matches "operation completed"
+    ```
+  </TabItem>
+</Tabs>
+
+The override only affects emits made through the scoped logger and its children; the global `Logger.get(name)` keeps writing to its configured sinks. See the [Testing](./guides/testing) guide for full assertions.
+
+## Which applications fit
+
+dagstack/logger is domain-agnostic. It works equally well for:
+
+- **Web and API services** — request logging, latency events, error tracking.
+- **Data pipelines** — job lifecycle, batch progress, throughput metrics.
+- **Workflow orchestrators** — operation hierarchy, retry events, run audit.
+- **AI / RAG platforms** — LLM call tracing, tool dispatch, token accounting (see the [AI-agent extension pack](./concepts/ai-agents)).
+- **Notification systems** — delivery attempts, provider responses, dead-letter handling.
+- **Billing / payment services** — transaction events, redaction of card data, audit trails.
+
+The mechanics are identical: define a logger name per module, configure sinks once, emit structured records, and let context propagation tie them to traces.
+
+## What to read next
+
+**Concepts** — the model behind the logger:
+
+- [Severity](./concepts/severity), [Sinks](./concepts/sinks), [Context propagation](./concepts/context).
+- [Operations and typed events](./concepts/operations), [Redaction](./concepts/redaction), [Scoped overrides](./concepts/scoped-overrides).
+- [Wire formats](./concepts/wire-formats), [AI-agent observability](./concepts/ai-agents).
+
+**Guides** — how to solve typical tasks:
+
+- [Configure the logger](./guides/configure), [Testing](./guides/testing), [Implement a custom sink](./guides/custom-sink).
+
+**Reference** — precise tables:
+
+- [LogRecord fields](./reference/log-record), [Severity table](./reference/severity-table), [Errors](./reference/errors).
+
+**Specification** — normative decisions:
+
+- [Overview](./spec/overview), [ADR-0001: Logger contract](./spec/adr/0001-logger-contract).
+
+**API reference**:
+
+- [Python](./api/python) — generated from the `dagstack-logger` package source.
+- [TypeScript](./api/typescript) — generated from the `@dagstack/logger` package source.
+- [Go](./api/go) — generated from the `go.dagstack.dev/logger` package source.

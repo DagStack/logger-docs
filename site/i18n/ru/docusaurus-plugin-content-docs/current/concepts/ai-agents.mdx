@@ -1,0 +1,152 @@
+---
+sidebar_position: 8
+title: Наблюдаемость AI-агентов
+description: Опциональный extension pack для LLM- и agent-приложений — пространства имён gen_ai, mcp, rag, agent, prompt. Соответствие OTel GenAI, усечение body, режим приватности.
+slug: /concepts/ai-agents
+---
+
+# Наблюдаемость AI-агентов
+
+Базовый логгер не зависит от домена. **Extension pack для AI-агентов** добавляет набор пространств имён атрибутов и типизированных событий для приложений вокруг LLM-вызовов, agent-конвейеров, retrieval-augmented generation и диспетчеризации инструментов через Model Context Protocol (MCP).
+
+Расширение опциональное: приложения без AI-конвейеров игнорируют его целиком. Когда pack загружен, перечисленные пространства имён становятся зарезервированными (биндинг отвергает пользовательские события на тех же префиксах); когда не загружен — это обычные пользовательские пространства имён.
+
+## Соответствие OpenTelemetry GenAI
+
+Pack обязуется быть **совместимым с [семантическими соглашениями OpenTelemetry GenAI](https://opentelemetry.io/docs/specs/semconv/gen-ai/)**:
+
+- Для концепций, покрытых OTel (`gen_ai.*`, `mcp.*`), pack использует имена атрибутов OTel как есть, без параллельных ключей под ту же идею.
+- Для концепций, которые OTel ещё не стабилизировал (`rag.*`, `agent.*`, `prompt.*`), pack определяет собственные пространства имён. Когда появится OTel-эквивалент, pack мигрирует на него в следующей мажорной версии logger-spec, со сроком устаревания для старых ключей.
+- Сопоставление-«источник истины» запланировано в `_meta/conventions/genai_otel_mapping.yaml` (v1.1) и будет обновляться к каждому релизу OTel GenAI; в биндингах v1.0 сопоставление поставляется инлайн.
+
+Бэкенды, уже понимающие OTel GenAI (Datadog, Grafana Cloud, Honeycomb, Langfuse, OpenLLMetry, Helicone), читают записи нативно — без отдельной адаптации под каждого вендора.
+
+## Пять пространств имён
+
+### `gen_ai.*` — используется как есть из OTel
+
+Стандартные атрибуты LLM-вызова. Самые частые ключи:
+
+| Атрибут | Значение |
+|---|---|
+| `gen_ai.system` | `openai`, `anthropic`, `gemini`, `vllm`, `openrouter`, `bedrock`, ... |
+| `gen_ai.operation.name` | `chat`, `text_completion`, `embeddings`, `tool_call` |
+| `gen_ai.request.model` | id запрошенной модели |
+| `gen_ai.response.model` | id фактической модели в ответе (может отличаться — например, версионирование OpenAI) |
+| `gen_ai.request.temperature`, `.top_p`, `.max_tokens`, `.frequency_penalty`, `.presence_penalty` | параметры сэмплирования |
+| `gen_ai.usage.input_tokens`, `.output_tokens`, `.cache.read_input_tokens` | учёт токенов |
+| `gen_ai.response.finish_reasons[]` | `stop`, `length`, `tool_calls`, `content_filter`, `function_call` |
+| `gen_ai.response.id` | id ответа от провайдера |
+| `gen_ai.tool.name`, `gen_ai.tool.call.id` | диспетчеризация инструмента |
+| `gen_ai.prompt.<N>.role`, `.content` | сообщения диалога (подпадают под усечение) |
+
+### `mcp.*` — используется как есть из OTel
+
+Наблюдаемость Model Context Protocol по соглашениям OTel MCP:
+
+| Атрибут | Значение |
+|---|---|
+| `mcp.server.name`, `mcp.server.version` | идентификация MCP-сервера |
+| `mcp.method.name` | `tools/call`, `tools/list`, `resources/list`, `resources/read`, `prompts/get`, `logging/setLevel` |
+| `mcp.request.id` | id JSON-RPC запроса |
+| `mcp.tool.name` | имя инструмента, когда `method.name = "tools/call"` |
+| `mcp.response.is_error` | bool |
+| `mcp.transport` | `stdio`, `http+sse`, `streamable_http` |
+
+### `rag.*` — специфично для dagstack
+
+У retrieval-augmented generation пока нет стабилизированного пространства имён в OTel, поэтому pack определяет собственное:
+
+| Атрибут | Значение |
+|---|---|
+| `rag.query.original`, `rag.query.rewritten` | пользовательский запрос и его rewrite (режим simple) |
+| `rag.retrieval.top_k`, `.min_score`, `.results_count` | параметры поиска и итог |
+| `rag.retrieval.collections[]` | имена коллекций, по которым шёл поиск |
+| `rag.chunk.id`, `.score`, `.repo`, `.path`, `.line_range` | per-chunk атрибуты в событии `chunk_retrieved` |
+| `rag.reranker.model`, `.top_n_before_rerank` | стадия rerank, если используется |
+
+### `agent.*` — специфично для dagstack
+
+Состояние agent-loop для многошаговых конвейеров:
+
+| Атрибут | Значение |
+|---|---|
+| `agent.pipeline` | `simple`, `agent`, `two_agent` |
+| `agent.role` | `analyst`, `answerer`, `describer`, `planner`, `executor` |
+| `agent.iteration`, `agent.iteration.max` | состояние цикла |
+| `agent.decision` | `continue`, `need_more`, `finish` |
+| `agent.decision.rationale` | свободное обоснование (v1.1 введёт структурированную форму) |
+
+### `prompt.*` — специфично для dagstack
+
+Метрики сборки prompt, дополняющие `gen_ai.*`:
+
+| Атрибут | Значение |
+|---|---|
+| `prompt.template.id`, `.template.version` | поиск шаблона prompt |
+| `prompt.section.system.tokens`, `.user.tokens`, `.history.tokens`, `.tools.tokens` | разбивка по секциям |
+| `prompt.total_tokens`, `.token_budget` | использованное число токенов и бюджет |
+| `prompt.truncated` | bool — была ли история диалога усечена под бюджет |
+| `prompt.content.markdown` | полный собранный prompt (подпадает под усечение) |
+
+## Типизированные события
+
+Pack публикует схемы событий под `event.domain = "ai_agent"`. Минимальный набор (полная схема будет жить в `_meta/events/ai_agent.yaml` в v1.1; в биндингах v1.0 списки атрибутов на каждое событие поставляются инлайн):
+
+| `event.name` | Когда отправляется | Обязательные атрибуты |
+|---|---|---|
+| `ai_agent.context.assembled` | prompt готов к отправке | `prompt.total_tokens`, `prompt.token_budget` |
+| `ai_agent.llm.request` | перед LLM-вызовом | `gen_ai.system`, `gen_ai.request.model`, `gen_ai.operation.name` |
+| `ai_agent.llm.response` | после ответа LLM | `gen_ai.response.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reasons` |
+| `ai_agent.llm.retry` | попытка повтора | `gen_ai.request.model`, `retry.attempt`, `retry.reason`, `retry.backoff_ms` |
+| `ai_agent.tool.called` | диспетчеризация инструмента | `gen_ai.tool.name`, `gen_ai.tool.call.id` |
+| `ai_agent.tool.returned` | ответ инструмента | `gen_ai.tool.name`, `operation.duration_ms`, `operation.status` |
+| `ai_agent.retrieval.requested`, `.completed` | границы RAG-поиска | `rag.retrieval.top_k`, `rag.retrieval.min_score` |
+| `ai_agent.iteration.started`, `.completed` | границы итерации agent-loop | `agent.iteration`, `agent.pipeline`, `agent.role` |
+| `ai_agent.decision` | смена состояния конвейера | `agent.decision`, `agent.decision.rationale` |
+| `ai_agent.session.started`, `.completed` | жизненный цикл сессии | `session.id`; на `completed`: суммарный учёт токенов и максимальный номер итерации |
+
+## Ключи корреляции
+
+Через W3C Baggage идут три ключа корреляции, чтобы каждая запись в одном пользовательском взаимодействии группировалась:
+
+- `session.id` — долгоживущая пользовательская сессия.
+- `conversation.id` — один обмен «вопрос — ответ» в сессии.
+- `agent.run.id` — одно исполнение agent-loop внутри одного обмена.
+
+Интуитивно вложенность — `session.id ⊃ conversation.id ⊃ agent.run.id`, но спека не предписывает иерархию: это рекомендация, плоский набор ключей тоже допустим.
+
+## Усечение body и приватность
+
+Prompt и ответы LLM легко переваливают за 100 КБ. Pack по умолчанию задаёт:
+
+- `max_body_bytes: 4096` — поля по шаблонам `*.content`, `*.markdown`, `*.code`, `*.table_json`, `*.html` усекаются, при этом проставляются `*_truncated: true` и `*_original_bytes: <N>`.
+- `capture_bodies: false` — значение по умолчанию для production. Совпавшие поля заменяются на `""` или `null`; выживают только метаданные (`gen_ai.usage.*`, `*_original_bytes`, `*_hash`).
+- `hash_bodies: true` — `*.content.hash = sha256(content)[:8]` позволяет дедупликацию и корреляцию между запусками без хранения исходного текста. Опциональная env-переменная `body_hash_salt` закрывает окружения, где утечка хеша сама по себе риск.
+
+Включай `capture_bodies: true` только в явном debug-режиме (например, через `DAGSTACK_DEBUG_AI=true` или на отдельный запрос через scoped-логгер — см. [Локальные переопределения](./scoped-overrides)).
+
+## Рекомендованная структура span
+
+Pack рекомендует иерархию OTel-span, естественно сочетающуюся с событиями:
+
+```
+span: ai_agent.session (root)
+  └─ span: ai_agent.run (один пользовательский запрос)
+      └─ span: ai_agent.iteration.1
+          ├─ span: ai_agent.context.assembly
+          ├─ span: gen_ai.chat (LLM-вызов — OTel GenAI)
+          │   events:  ai_agent.llm.request → ai_agent.llm.response
+          ├─ span: mcp.tools/call (диспетчеризация инструмента — OTel MCP)
+          │   events:  ai_agent.tool.called → ai_agent.tool.returned
+          └─ span: mcp.tools/call (read_file)
+      └─ span: ai_agent.iteration.2 …
+```
+
+Корреляция трассировок и логов работает автоматически — каждая запись несёт `trace_id` / `span_id` по [Пробросу контекста](./context).
+
+## См. также
+
+- [Операции и типизированные события](./operations) — базовое соглашение, на которое опирается AI-pack.
+- [Маскирование](./redaction) — как содержимое prompt взаимодействует со списком масок по суффиксу.
+- [ADR-0001 §5.5 (полный нормативный текст)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#55-ai-agent-conventions-optional-extension-pack).

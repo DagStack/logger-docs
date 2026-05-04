@@ -1,0 +1,114 @@
+{
+  "version.label": {
+    "message": "Next",
+    "description": "The label for version current"
+  },
+  "sidebar.mainSidebar.category.Concepts": {
+    "message": "Концепции",
+    "description": "The label for category 'Concepts' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.Concepts.link.generated-index.title": {
+    "message": "Концепции",
+    "description": "The generated-index page title for category 'Concepts' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.Concepts.link.generated-index.description": {
+    "message": "Базовые концепции контракта логгера — уровни, приёмники, проброс контекста, операции и типизированные события, маскирование, локальные переопределения, форматы передачи, extension pack для AI-агентов.",
+    "description": "The generated-index page description for category 'Concepts' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.Guides": {
+    "message": "Руководства",
+    "description": "The label for category 'Guides' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.Guides.link.generated-index.title": {
+    "message": "Руководства",
+    "description": "The generated-index page title for category 'Guides' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.Guides.link.generated-index.description": {
+    "message": "Практические задачи — настройка логгера, захват записей в тестах, реализация собственного приёмника.",
+    "description": "The generated-index page description for category 'Guides' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.Format reference": {
+    "message": "Справочник по формату",
+    "description": "The label for category 'Format reference' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.Format reference.link.generated-index.title": {
+    "message": "Справочник по формату",
+    "description": "The generated-index page title for category 'Format reference' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.Format reference.link.generated-index.description": {
+    "message": "Точные таблицы полей LogRecord, severity_number и модели ошибок биндинга.",
+    "description": "The generated-index page description for category 'Format reference' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.Specification": {
+    "message": "Спецификация",
+    "description": "The label for category 'Specification' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.Specification.link.generated-index.title": {
+    "message": "Спецификация",
+    "description": "The generated-index page title for category 'Specification' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.Specification.link.generated-index.description": {
+    "message": "Нормативные архитектурные решения по контракту логгера. Резюме плюс ссылки на полные нормативные ADR в spec-репозитории.",
+    "description": "The generated-index page description for category 'Specification' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.ADRs": {
+    "message": "ADR",
+    "description": "The label for category 'ADRs' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.ADRs.link.generated-index.title": {
+    "message": "ADR",
+    "description": "The generated-index page title for category 'ADRs' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.ADRs.link.generated-index.description": {
+    "message": "Architectural decision records по контракту логгера.",
+    "description": "The generated-index page description for category 'ADRs' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.API reference": {
+    "message": "Справочник API",
+    "description": "The label for category 'API reference' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.API reference.link.generated-index.title": {
+    "message": "Справочник API",
+    "description": "The generated-index page title for category 'API reference' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.API reference.link.generated-index.description": {
+    "message": "Справочник публичного API каждого биндинга по языкам.",
+    "description": "The generated-index page description for category 'API reference' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.Python": {
+    "message": "Python",
+    "description": "The label for category 'Python' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.Python.link.generated-index.title": {
+    "message": "Python API",
+    "description": "The generated-index page title for category 'Python' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.Python.link.generated-index.description": {
+    "message": "Справочник публичного API пакета dagstack-logger.",
+    "description": "The generated-index page description for category 'Python' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.TypeScript": {
+    "message": "TypeScript",
+    "description": "The label for category 'TypeScript' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.TypeScript.link.generated-index.title": {
+    "message": "TypeScript API",
+    "description": "The generated-index page title for category 'TypeScript' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.TypeScript.link.generated-index.description": {
+    "message": "Справочник публичного API npm-пакета @dagstack/logger.",
+    "description": "The generated-index page description for category 'TypeScript' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.Go": {
+    "message": "Go",
+    "description": "The label for category 'Go' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.Go.link.generated-index.title": {
+    "message": "Go API",
+    "description": "The generated-index page title for category 'Go' in sidebar 'mainSidebar'"
+  },
+  "sidebar.mainSidebar.category.Go.link.generated-index.description": {
+    "message": "Справочник публичного API пакета go.dagstack.dev/logger.",
+    "description": "The generated-index page description for category 'Go' in sidebar 'mainSidebar'"
+  }
+}

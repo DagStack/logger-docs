@@ -1,0 +1,90 @@
+---
+sidebar_position: 1
+title: LogRecord fields
+description: Reference table of every field on the LogRecord dataclass — type, optionality, semantics, ownership, wire encoding.
+slug: /reference/log-record
+---
+
+# LogRecord fields
+
+The internal representation of a log line. Every binding exposes a typed `LogRecord` dataclass with the fields below; wire serialisation lives in separate functions (see [Wire formats](../concepts/wire-formats)).
+
+## Field table
+
+| Field | Type | Optional | Default | Set by | Meaning |
+|---|---|---|---|---|---|
+| `time_unix_nano` | `int` (uint64) | no | `time.time_ns()` at emit | producer | Emit timestamp, nanoseconds since Unix epoch (OTel `TimeUnixNano`). |
+| `severity_number` | `int` | no | — | caller | OTel severity 1-24. |
+| `severity_text` | `str` | no | derived from `severity_number` | binding | One of six canonical strings (`TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`). |
+| `body` | `Value` | no | — | caller | Primary message — string or structured (map/array/scalar). |
+| `attributes` | `dict[str, Value]` | yes | `{}` | caller + binding | Per-record key-value context. Redaction applies before fan-out. |
+| `instrumentation_scope` | `InstrumentationScope?` | yes | `null` | binding | Logger self-descriptor (name, version). Set when `Logger.get(name, version)` is used. |
+| `resource` | `Resource?` | yes | `null` | binding | Process/service/host attributes. Inherited from the root logger after `configure(resource_attributes=...)`. |
+| `trace_id` | `bytes(16)?` | yes | `null` | binding | W3C Trace Context — 16 random bytes. Filled from the OTel context if a span is active. |
+| `span_id` | `bytes(8)?` | yes | `null` | binding | W3C Trace Context — 8 random bytes. Same source as `trace_id`. |
+| `trace_flags` | `int` (uint8) | no | `0` | binding | W3C flags (sampled bit, etc.). `0` = not-sampled. |
+| `observed_time_unix_nano` | `int?` (uint64) | yes | `null` | sink (on ingest) | Ingest timestamp at the sink. Producer leaves null; sink fills it before wire serialisation (per spec §1). |
+
+## The `Value` type
+
+`Value` is a recursive sum type used for `body` and attribute values. Concrete shape:
+
+```
+Value = str | int | float | bool | null | dict[str, Value] | list[Value]
+```
+
+The same shape backs `ConfigTree` in [`config-spec`](https://config.dagstack.dev/docs/concepts/sources) §1; consumers may reuse a single language-level type to represent both. Values are JSON-serialisable (the `Value` set is exactly the JSON value set).
+
+## `InstrumentationScope`
+
+Self-descriptor for the logger that emitted the record:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` | `str` | Logger name (matches `Logger.get(name)` argument). |
+| `version` | `str?` | Semantic version, set by `Logger.get(name, version)`. |
+| `attributes` | `dict[str, Value]` | Optional scope-level attributes. |
+
+For records emitted by a plugin, the scope is recommended to match the plugin's `id` and `version` from its `PluginManifest` (see `dagstack/plugin-system-spec`).
+
+## `Resource`
+
+Process-level attributes shared across every logger in the process:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `attributes` | `dict[str, Value]` | OTel Resource attributes — `service.name`, `service.version`, `service.instance.id`, `deployment.environment`, `host.name`, `process.pid`, `telemetry.sdk.{name,version,language}`, etc. |
+
+A binding detects Resource attributes through:
+
+1. OTel autodetect (`OTEL_RESOURCE_ATTRIBUTES` env var, OTel Resource Detectors).
+2. Explicit config from the `logging.resource.*` section.
+3. Merge: env-detected ∪ config-supplied (config wins).
+
+## Field ownership
+
+Per spec §1 ownership rules:
+
+- **Caller** sets `severity_number`, `body`, optional `attributes`. The caller never sets `time_unix_nano` directly; the binding fills it at emit.
+- **Binding** fills `time_unix_nano`, `severity_text`, `instrumentation_scope`, `resource`, `trace_id`, `span_id`, `trace_flags`, plus any attributes injected via Baggage propagation.
+- **Sink** fills `observed_time_unix_nano` if the producer left it null. Doing so guarantees that wire output always carries an ingest timestamp.
+
+## Wire encoding overview
+
+The same field set serialises to three wire formats with format-specific encoding rules. See [Wire formats](../concepts/wire-formats) for the full table; a short version:
+
+| Field | OTLP protobuf | OTel JSON | dagstack JSON-lines |
+|---|---|---|---|
+| `time_unix_nano` | `fixed64` | string-decimal | int (Canonical JSON allows int64) |
+| `trace_id` | `bytes(16)` | lowercase 32-hex | lowercase 32-hex |
+| `span_id` | `bytes(8)` | lowercase 16-hex | lowercase 16-hex |
+| `severity_number` | int | int | int |
+| `severity_text` | string | string | string |
+| Casing | (binary) | camelCase | snake_case |
+
+## See also
+
+- [Severity reference table](./severity-table) — full 24-row enumeration.
+- [Wire formats](../concepts/wire-formats) — encoding rules per format.
+- [Context propagation](../concepts/context) — what fills `trace_id` / `span_id`.
+- [ADR-0001 §1 (full normative text)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#1-log-data-model-wire-format).

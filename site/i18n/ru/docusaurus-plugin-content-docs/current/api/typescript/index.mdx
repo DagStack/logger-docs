@@ -1,0 +1,282 @@
+---
+sidebar_position: 1
+title: TypeScript API — обзор
+description: Справочник публичного API npm-пакета @dagstack/logger — Logger, configure, отправки по уровням, приёмники, локальные переопределения, LogRecord.
+slug: /api/typescript
+---
+
+# TypeScript API — обзор
+
+Пакет `@dagstack/logger` реализует контракт логгера для Node.js (≥ 20). Phase 1 (опубликован на npmjs.org как v0.1.x) поставляет ядро API плюс три приёмника; Phase 2 добавит OTLP-экспортёр и цепочку LogProcessor.
+
+## Публичные экспорты
+
+Barrel-реэкспорты пакета:
+
+| Символ | Тип | Модуль |
+|---|---|---|
+| `Logger` | класс | `@dagstack/logger` (`src/logger.ts`) |
+| `LogRecord` | тип | `@dagstack/logger` (`src/records.ts`) |
+| `Resource` | тип | `@dagstack/logger` (`src/records.ts`) |
+| `InstrumentationScope` | тип | `@dagstack/logger` (`src/records.ts`) |
+| `Value` | тип | `@dagstack/logger` (`src/records.ts`) |
+| `Severity` | const-объект + типы `SeverityValue` / `SeverityText` | `@dagstack/logger` (`src/severity.ts`) |
+| `Sink` | интерфейс | `@dagstack/logger` (`src/sinks/base.ts`) |
+| `ConsoleSink`, `FileSink`, `InMemorySink` | классы | `@dagstack/logger` (`src/sinks/`) |
+| `ConsoleMode`, `ConsoleSinkOptions`, `FileSinkOptions`, `InMemorySinkOptions`, `FlushResult` | типы | `@dagstack/logger` (`src/sinks/`) |
+| `Subscription`, `SubscriptionInit` | класс + тип | `@dagstack/logger` (`src/subscription.ts`) |
+| `configure`, `ConfigureOptions` | функция + тип | `@dagstack/logger` (`src/configuration.ts`) |
+| `MASKED_PLACEHOLDER`, `DEFAULT_SECRET_SUFFIXES`, `isSecretField`, `maskValue`, `redactAttributes` | константы + функции | `@dagstack/logger` (`src/redaction.ts`) |
+| `getActiveTraceContext`, `getBaggageAttributes`, `DEFAULT_BAGGAGE_KEYS` | функции + константа | `@dagstack/logger` (`src/context.ts`) |
+| `toDagstackJsonl`, `toDagstackJsonlObject` | функции | `@dagstack/logger` (`src/wire.ts`) |
+| `canonicalJsonStringify`, `canonicalJsonStringifyBytes` | функции | `@dagstack/logger` (`src/canonical-json.ts`) |
+| `traceIdToHex`, `spanIdToHex`, `hexToTraceId`, `hexToSpanId`, `otelTraceIdToBytes`, `otelSpanIdToBytes` | функции | `@dagstack/logger` (`src/trace-ids.ts`) |
+| `VERSION` | строковая константа | `@dagstack/logger` (берётся из `package.json`) |
+
+Импортируй нужную часть API:
+
+```typescript
+import {
+    Logger,
+    ConsoleSink,
+    FileSink,
+    InMemorySink,
+    Severity,
+    configure,
+    type LogRecord,
+    type Sink,
+} from "@dagstack/logger";
+```
+
+## `configure(options?)` — глобальный bootstrap
+
+```typescript
+interface ConfigureOptions {
+    readonly rootLevel?: string | number;
+    readonly sinks?: readonly Sink[];
+    readonly perLoggerLevels?: Readonly<Record<string, string | number>>;
+    readonly resourceAttributes?: Readonly<Record<string, Value>>;
+}
+
+function configure(options?: ConfigureOptions): void;
+```
+
+Инициализирует глобальное состояние логгера. Устанавливает порог уровня root-логгера, подключает приёмники, применяет переопределения по логгерам и засевает OTel `Resource` атрибутами уровня процесса. Вызывай один раз при старте приложения, до того как бизнес-код вызовет `Logger.get(name)`.
+
+Голый вызов `configure()` ставит `rootLevel` по умолчанию в `"INFO"`, список приёмников — пустой, ресурс сбрасывается. Уровни принимают канонические имена (`"INFO"`, `"WARN"`, ...) или целые числа в диапазоне `[1, 24]` — передача неизвестного имени бросает `RangeError`.
+
+Полный пошаговый разбор — в руководстве [Настройка логгера](/docs/guides/configure).
+
+## `Logger` — реестр именованных логгеров
+
+```typescript
+class Logger {
+    static get(name?: string, version?: string): Logger;
+
+    readonly name: string;
+    readonly version: string | undefined;
+
+    // Отправки по уровням
+    trace(body: Value, attributes?: Readonly<Record<string, Value>>): void;
+    debug(body: Value, attributes?: Readonly<Record<string, Value>>): void;
+    info(body: Value, attributes?: Readonly<Record<string, Value>>): void;
+    warn(body: Value, attributes?: Readonly<Record<string, Value>>): void;
+    error(body: Value, attributes?: Readonly<Record<string, Value>>): void;
+    fatal(body: Value, attributes?: Readonly<Record<string, Value>>): void;
+    log(severityNumber: number, body: Value, attributes?: Readonly<Record<string, Value>>): void;
+    exception(err: unknown, options?: ExceptionOptions): void;
+
+    // Мутаторы конфигурации
+    setSinks(sinks: readonly Sink[]): void;
+    setMinSeverity(severityNumber: number): void;
+    setResource(resource: Resource | undefined): void;
+
+    // Локальные переопределения
+    withSinks(sinks: readonly Sink[]): Logger;
+    appendSinks(extras: readonly Sink[]): Logger;
+    withoutSinks(): Logger;
+    scopeSinks<T>(
+        sinks: readonly Sink[],
+        callback: (logger: Logger) => T | Promise<T>,
+    ): Promise<T>;
+    child(attributes: Readonly<Record<string, Value>>): Logger;
+
+    // Жизненный цикл
+    flush(timeoutMs?: number): Promise<FlushResult>;
+    close(): Promise<void>;
+
+    // Интроспекция
+    effectiveSinks(): Sink[];
+    effectiveMinSeverity(): number;
+    effectiveResource(): Resource | undefined;
+
+    // Subscription (Phase 1 — неактивна)
+    onReconfigure(callback: () => void): Subscription;
+}
+```
+
+Конструируется только через `Logger.get(name, version)`; реестр кеширует один экземпляр на имя. Дочерние логгеры, созданные `child(...)`, `withSinks(...)`, `appendSinks(...)`, `withoutSinks(...)`, — отвязанные (некешированные); они наследуют конфигурацию родителя, но в глобальном реестре не участвуют.
+
+`scopeSinks` — TypeScript-идиома лексически ограниченного переопределения по спеке (ближайший аналог контекст-менеджера `with` в Python). Принимает callback, подменяет приёмники на `this` на время выполнения callback и восстанавливает их по завершении или throw.
+
+## `Severity` — константы групп
+
+```typescript
+const Severity = {
+    TRACE: 1,
+    DEBUG: 5,
+    INFO: 9,
+    WARN: 13,
+    ERROR: 17,
+    FATAL: 21,
+} as const;
+
+type SeverityValue = (typeof Severity)[keyof typeof Severity];
+type SeverityText = "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR" | "FATAL";
+```
+
+Хелперы: `severityTextFor(severityNumber)`, `isCanonicalSeverityText(text)`, `isValidSeverityNumber(n)`. Полное перечисление 1–24 — на странице [Справочная таблица уровней](/docs/reference/severity-table).
+
+## Приёмники
+
+Три конкретных приёмника плюс интерфейс `Sink`:
+
+```typescript
+interface Sink {
+    readonly id: string;
+    emit(record: LogRecord): void;
+    flush(timeoutMs?: number): Promise<FlushResult>;
+    close(): Promise<void>;
+    supportsSeverity(severityNumber: number): boolean;
+}
+
+type FlushResult =
+    | { ok: true }
+    | { ok: false; partial?: boolean; failedSinks?: { sinkId: string; error: string }[] };
+
+type ConsoleMode = "auto" | "json" | "pretty";
+
+interface ConsoleSinkOptions {
+    readonly mode?: ConsoleMode;
+    readonly stream?: ConsoleStream;       // по умолчанию process.stderr
+    readonly minSeverity?: number;
+}
+
+class ConsoleSink implements Sink {
+    constructor(options?: ConsoleSinkOptions);
+}
+
+interface FileSinkOptions {
+    readonly maxBytes?: number;            // 0 = без ротации
+    readonly keep?: number;                // сколько архивных файлов хранить
+    readonly minSeverity?: number;
+}
+
+class FileSink implements Sink {
+    constructor(filePath: string, options?: FileSinkOptions);
+}
+
+interface InMemorySinkOptions {
+    readonly capacity?: number;            // по умолчанию 1000
+    readonly minSeverity?: number;
+}
+
+class InMemorySink implements Sink {
+    readonly capacity: number;
+    constructor(options?: InMemorySinkOptions);
+    records(): LogRecord[];                // снимок (копия)
+    clear(): void;
+}
+```
+
+`ConsoleSink` пишет в `process.stderr` по умолчанию. `mode: "auto"` выбирает pretty, когда поток — TTY, и JSON-lines в остальных случаях.
+
+`FileSink` открывает путь в режиме append и ротирует по размеру (`path.1`, `path.2`, ... до `keep`). `maxBytes: 0` отключает ротацию полностью.
+
+`InMemorySink` — кольцевой буфер для тестов; самая старая запись отбрасывается при превышении capacity.
+
+См. раздел [Приёмники](/docs/concepts/sinks) для использования и [руководство по созданию собственного приёмника](/docs/guides/custom-sink) для реализации протокола.
+
+## `LogRecord` — типизированная запись
+
+```typescript
+interface LogRecord {
+    readonly time_unix_nano: bigint;
+    readonly severity_number: number;
+    readonly severity_text: string;
+    readonly body: Value;
+    readonly attributes: Readonly<Record<string, Value>>;
+    readonly instrumentation_scope?: InstrumentationScope;
+    readonly resource?: Resource;
+    readonly trace_id?: Uint8Array;        // 16 байт, когда задан
+    readonly span_id?: Uint8Array;         // 8 байт, когда задан
+    readonly trace_flags: number;
+    readonly observed_time_unix_nano?: bigint;
+}
+```
+
+По спеке §1 набор полей совпадает с OTel Log Data Model v1.24. snake_case сохраняется на типизированной записи (и в формате передачи dagstack JSON-lines); только мутаторы и параметры конструктора *самого биндинга* (`setMinSeverity`, `minSeverity`, `maxBytes`) используют camelCase. Полная таблица семантики и владения полями — на странице [Поля LogRecord](/docs/reference/log-record).
+
+## Хелперы маскирования
+
+```typescript
+const MASKED_PLACEHOLDER = "***";
+const DEFAULT_SECRET_SUFFIXES: readonly string[] = [
+    "_key", "_secret", "_token", "_password", "_passphrase", "_credentials",
+];
+
+function isSecretField(key: string, suffixes?: readonly string[]): boolean;
+function maskValue(key: string, value: Value, suffixes?: readonly string[]): Value;
+function redactAttributes(
+    attrs: Readonly<Record<string, Value>>,
+    suffixes?: readonly string[],
+): Record<string, Value>;
+```
+
+Логгер автоматически применяет `redactAttributes` внутри `emit`. Самостоятельные хелперы выставлены для авторов приёмников и тестов, которым нужно проверять маскированную форму напрямую.
+
+## Формат передачи
+
+```typescript
+function toDagstackJsonl(record: LogRecord): string;
+function toDagstackJsonlObject(record: LogRecord): Record<string, JsonValue>;
+```
+
+`toDagstackJsonl` производит одну строку Canonical JSON (snake_case-ключи, hex trace id, целочисленные временные метки, рекурсивно отсортированные ключи). Используется внутри `ConsoleSink(mode: "json")` и `FileSink`; экспонирован для вызывающих, собирающих собственные приёмники.
+
+## Проброс контекста
+
+```typescript
+const DEFAULT_BAGGAGE_KEYS: readonly string[] = ["tenant.id", "request.id", "user.id"];
+
+interface ActiveTraceContext {
+    readonly traceId: Uint8Array | undefined;
+    readonly spanId: Uint8Array | undefined;
+    readonly traceFlags: number;
+}
+
+function getActiveTraceContext(): ActiveTraceContext;
+function getBaggageAttributes(allowedKeys?: readonly string[]): Record<string, Value>;
+```
+
+Оба хелпера читают из `@opentelemetry/api` напрямую; биндинг не «вендорит» параллельную реализацию контекста. Когда SDK не зарегистрирован, активна no-op-реализация OTel, и обе функции возвращают пустые значения.
+
+## `Subscription` — в Phase 1 неактивна
+
+`Subscription` зеркалит тип `Subscription` из `config-spec` — `path`, `active`, `inactiveReason`. В Phase 1 логгер не подписывается на изменения конфига в рантайме; `Logger.onReconfigure(callback)` возвращает неактивную подписку с `inactiveReason: "Phase 1 logger does not support watch-based reconfigure"` и эмитит одноразовое предупреждение. Phase 2 включит путь watch.
+
+## Идиоматические отличия от Python
+
+- **Мутаторы и опции в camelCase.** `setMinSeverity`, `withSinks`, `minSeverity`, `maxBytes` — соглашение TypeScript. Ключи формата передачи (`severity_number`, `trace_id` и т. д.) и поля типизированного `LogRecord` остаются в snake_case в соответствии со спекой.
+- **Async-жизненный цикл на Promise.** `flush()`, `close()` и `scopeSinks(callback)` — `async` (возвращают `Promise`). Emit по уровням остаются синхронными с точки зрения вызывающего; реализация может буферизовать внутри приёмников Phase 2.
+- **`scopeSinks` — callback-форма.** Где Python использует `with logger.scope_sinks(...):`, TypeScript использует `await logger.scopeSinks([...], async (scoped) => { ... })`. Callback получает тот же экземпляр логгера с заменёнными приёмниками на время выполнения.
+- **Временные метки на `bigint`.** `time_unix_nano` — JavaScript `bigint`, чтобы сохранить наносекундную точность за пределами `2^53`. Форматы передачи сериализуют как сырые JSON-целые (dagstack JSON-lines через bigint-поддержку Canonical JSON) или как десятичные строки (OTel JSON, Phase 2).
+- **`Severity` — const-объект, а не enum.** Дружественен tree-shaking и совпадает с современными соглашениями TypeScript; паттерн доступа `Severity.INFO` в месте вызова работает по-прежнему.
+
+## См. также
+
+- [Быстрый старт](/docs/intro) — самый короткий сквозной пример.
+- [Настройка логгера](/docs/guides/configure) — полный пошаговый разбор инициализации.
+- [Захват логов в тестах](/docs/guides/testing) — паттерны `InMemorySink`.
+- [Реализация собственного приёмника](/docs/guides/custom-sink) — детали протокола.
+- [Исходники `@dagstack/logger` на GitHub](https://github.com/dagstack/logger-typescript).

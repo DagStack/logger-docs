@@ -1,0 +1,197 @@
+---
+sidebar_position: 5
+title: Маскирование
+description: Маскирование атрибутов по суффиксу ключа — _key, _secret, _token, _password, _passphrase, _credentials. Как правило применяется рекурсивно к вложенным атрибутам.
+slug: /concepts/redaction
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Маскирование
+
+Логгер автоматически маскирует значения атрибутов, чьи ключи совпадают с одним из шести суффиксных шаблонов. Маска применяется на этапе emit, до того как запись достигнет любого приёмника, поэтому исходное секретное значение никогда не пересекает границу API логгера в помеченном атрибуте.
+
+## Список суффиксов по умолчанию
+
+По умолчанию логгер маскирует атрибуты, чей ключ (без учёта регистра) заканчивается на:
+
+```
+_key
+_secret
+_token
+_password
+_passphrase
+_credentials
+```
+
+У совпавшего ключа значение заменяется на буквальную строку `"***"`. Список суффиксов живёт в `config-spec/_meta/secret_patterns.yaml` и общий для `dagstack/config` и `dagstack/logger` — добавление нового шаблона в одном месте обновляет обе библиотеки на следующем прогоне эмиттера.
+
+## Поведение
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import Logger
+
+    logger = Logger.get("auth")
+
+    logger.info("user authenticated", attributes={
+        "user.id": 42,
+        "api_key": "sk-very-secret-value",         # → "***"
+        "session_token": "ey...",                   # → "***"
+        "request.id": "req-abc",
+    })
+    # Отправленная запись:
+    # attributes = {
+    #   "user.id": 42,
+    #   "api_key": "***",
+    #   "session_token": "***",
+    #   "request.id": "req-abc",
+    # }
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { Logger } from "@dagstack/logger";
+
+    const logger = Logger.get("auth");
+
+    logger.info("user authenticated", {
+        "user.id": 42,
+        "api_key": "sk-very-secret-value",       // → "***"
+        "session_token": "ey...",                  // → "***"
+        "request.id": "req-abc",
+    });
+    // Отправленная запись:
+    // attributes = {
+    //   "user.id": 42,
+    //   "api_key": "***",
+    //   "session_token": "***",
+    //   "request.id": "req-abc",
+    // }
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    log := logger.Get("auth")
+
+    log.Info("user authenticated", logger.Attrs{
+        "user.id":       42,
+        "api_key":       "sk-very-secret-value", // → "***"
+        "session_token": "ey...",                // → "***"
+        "request.id":    "req-abc",
+    })
+    // Отправленная запись:
+    // attributes = {
+    //   "user.id": 42,
+    //   "api_key": "***",
+    //   "session_token": "***",
+    //   "request.id": "req-abc",
+    // }
+    ```
+  </TabItem>
+</Tabs>
+
+## Вложенные атрибуты
+
+Маскирование применяется **рекурсивно** через вложенные maps. Секрет, спрятанный внутри структурированного атрибута, маскируется на любой глубине:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    logger.info("config snapshot", attributes={
+        "config": {
+            "service.name": "order-service",
+            "auth": {
+                "client_secret": "shh",         # → "***"
+                "redirect_url": "https://...",
+            },
+        },
+    })
+    # Результат:
+    # attributes = {
+    #   "config": {
+    #     "service.name": "order-service",
+    #     "auth": {
+    #       "client_secret": "***",
+    #       "redirect_url": "https://...",
+    #     },
+    #   },
+    # }
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    logger.info("config snapshot", {
+        config: {
+            "service.name": "order-service",
+            auth: {
+                "client_secret": "shh",          // → "***"
+                "redirect_url": "https://...",
+            },
+        },
+    });
+    // Результат:
+    // attributes = {
+    //   config: {
+    //     "service.name": "order-service",
+    //     auth: {
+    //       "client_secret": "***",
+    //       "redirect_url": "https://...",
+    //     },
+    //   },
+    // }
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    log.Info("config snapshot", logger.Attrs{
+        "config": map[string]any{
+            "service.name": "order-service",
+            "auth": map[string]any{
+                "client_secret": "shh",          // → "***"
+                "redirect_url":  "https://...",
+            },
+        },
+    })
+    // Результат повторяет примеры Python / TS — рекурсия по вложенным
+    // map[string]any обходит каждый ключ и маскирует совпадающие суффиксы.
+    ```
+  </TabItem>
+</Tabs>
+
+## Что **не** маскируется
+
+- **`LogRecord.body`** — основное сообщение. Маскирование произвольной подстроки внутри body потребовало бы дорогого сопоставления по шаблону на сыром тексте с большим риском ложных срабатываний. Разработчики обязаны форматировать body без секретов; если значение нужно включить — клади его в помеченный атрибут, а не в body.
+- **Ключи атрибутов** — маскируются только значения, ключи — никогда. Ключ `api_key` остаётся `api_key`; значение становится `"***"`.
+- **Типизированные поля OTel** — `trace_id`, `span_id`, `instrumentation_scope`, `resource` не подпадают под суффиксное совпадение; их смысл зафиксирован спекой.
+
+## Пользовательские шаблоны
+
+Phase 1 поставляет только список суффиксов по умолчанию. Phase 2 вводит `RedactionProcessor` в цепочке LogProcessor (спека §10.3), позволяя приложениям добавлять regex-шаблоны:
+
+```yaml
+# Phase 2 — пока не активно в v0.1.x
+processors:
+  - type: redaction
+    extra_patterns:
+      - pattern: "user\\.email"
+        replacement: "<redacted-email>"
+      - pattern: ".*_pii"
+        replacement: "***"
+```
+
+Пока процессоры не появились, обходной путь — почистить атрибут до того, как передавать его в `logger.info(...)`, например хешируя или урезая поле в коде приложения.
+
+## Почему суффиксное совпадение, а не сканирование значений
+
+Сканирование каждого значения по шаблонам «выглядит как секрет» (высокоэнтропийные строки, regex для JWT) — дорого и легко ошибается. Совпадение по суффиксу ключа — дёшево, детерминировано и легко проверяется: ревьюер, читающий код, сразу видит, будет ли поле замаскировано.
+
+Дисциплина суффиксов — это то, что обеспечивает совместимость [маскирования секретов config-spec](https://config.dagstack.dev/docs/concepts/secrets) и маскирования логгера. Один и тот же список шаблонов `_key`, `_secret`, `_token`, `_password`, `_passphrase`, `_credentials` соблюдают обе библиотеки.
+
+## См. также
+
+- [Поля LogRecord](../reference/log-record) — какие поля существуют и в каких могут оказаться секреты.
+- [Реализация собственного приёмника](../guides/custom-sink) — как автор приёмника должен обращаться с уже замаскированными значениями.
+- [ADR-0001 §10 (полный нормативный текст)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#10-redaction).

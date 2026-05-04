@@ -1,0 +1,152 @@
+---
+sidebar_position: 8
+title: AI-agent observability
+description: Optional extension pack for LLM and agent applications — gen_ai, mcp, rag, agent, prompt namespaces. OTel GenAI conformance, body truncation, privacy mode.
+slug: /concepts/ai-agents
+---
+
+# AI-agent observability
+
+The core logger is domain-agnostic. The **AI-agent extension pack** adds a set of attribute namespaces and typed events for applications built around LLM calls, agentic pipelines, retrieval-augmented generation, and Model Context Protocol (MCP) tool dispatch.
+
+The extension is opt-in: applications without AI pipelines ignore it entirely. When the pack is loaded, the listed namespaces become reserved (a binding rejects user-defined events on the same prefixes); when it is not loaded, those namespaces are simply user-defined.
+
+## OpenTelemetry GenAI conformance
+
+The pack commits to **conformance with the [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)**:
+
+- For OTel-covered concepts (`gen_ai.*`, `mcp.*`) the pack uses the OTel attribute names as-is, with no parallel keys for the same idea.
+- For concepts OTel has not yet stabilised (`rag.*`, `agent.*`, `prompt.*`), the pack defines its own namespaces. When an OTel equivalent appears, the pack migrates to it in the next major version of logger-spec, with a deprecation period for the old keys.
+- A source-of-truth mapping is planned at `_meta/conventions/genai_otel_mapping.yaml` (v1.1) and will be updated on every OTel GenAI release; v1.0 bindings ship the mapping inline.
+
+Backends that already understand OTel GenAI (Datadog, Grafana Cloud, Honeycomb, Langfuse, OpenLLMetry, Helicone) read the records natively without per-vendor adaptation.
+
+## The five namespaces
+
+### `gen_ai.*` — used as-is from OTel
+
+Standard LLM-call attributes. The most common keys:
+
+| Attribute | Meaning |
+|---|---|
+| `gen_ai.system` | `openai`, `anthropic`, `gemini`, `vllm`, `openrouter`, `bedrock`, ... |
+| `gen_ai.operation.name` | `chat`, `text_completion`, `embeddings`, `tool_call` |
+| `gen_ai.request.model` | model id as requested |
+| `gen_ai.response.model` | model id as returned (may differ — e.g., OpenAI versioning) |
+| `gen_ai.request.temperature`, `.top_p`, `.max_tokens`, `.frequency_penalty`, `.presence_penalty` | sampling params |
+| `gen_ai.usage.input_tokens`, `.output_tokens`, `.cache.read_input_tokens` | token accounting |
+| `gen_ai.response.finish_reasons[]` | `stop`, `length`, `tool_calls`, `content_filter`, `function_call` |
+| `gen_ai.response.id` | provider-assigned response id |
+| `gen_ai.tool.name`, `gen_ai.tool.call.id` | tool dispatch |
+| `gen_ai.prompt.<N>.role`, `.content` | conversational messages (subject to truncation) |
+
+### `mcp.*` — used as-is from OTel
+
+Model Context Protocol observability per the OTel MCP conventions:
+
+| Attribute | Meaning |
+|---|---|
+| `mcp.server.name`, `mcp.server.version` | MCP server identity |
+| `mcp.method.name` | `tools/call`, `tools/list`, `resources/list`, `resources/read`, `prompts/get`, `logging/setLevel` |
+| `mcp.request.id` | JSON-RPC request id |
+| `mcp.tool.name` | tool name when `method.name = "tools/call"` |
+| `mcp.response.is_error` | boolean |
+| `mcp.transport` | `stdio`, `http+sse`, `streamable_http` |
+
+### `rag.*` — dagstack-specific
+
+Retrieval-augmented generation has no stabilised OTel namespace yet, so the pack defines its own:
+
+| Attribute | Meaning |
+|---|---|
+| `rag.query.original`, `rag.query.rewritten` | the user query and its rewrite (simple mode) |
+| `rag.retrieval.top_k`, `.min_score`, `.results_count` | retrieval params and outcome |
+| `rag.retrieval.collections[]` | searched collection names |
+| `rag.chunk.id`, `.score`, `.repo`, `.path`, `.line_range` | per-chunk attributes in the `chunk_retrieved` event |
+| `rag.reranker.model`, `.top_n_before_rerank` | rerank stage, when used |
+
+### `agent.*` — dagstack-specific
+
+Agent-loop state for multi-step pipelines:
+
+| Attribute | Meaning |
+|---|---|
+| `agent.pipeline` | `simple`, `agent`, `two_agent` |
+| `agent.role` | `analyst`, `answerer`, `describer`, `planner`, `executor` |
+| `agent.iteration`, `agent.iteration.max` | loop state |
+| `agent.decision` | `continue`, `need_more`, `finish` |
+| `agent.decision.rationale` | free-form rationale (v1.1 will introduce a structured form) |
+
+### `prompt.*` — dagstack-specific
+
+Prompt-assembly metrics, complementary to `gen_ai.*`:
+
+| Attribute | Meaning |
+|---|---|
+| `prompt.template.id`, `.template.version` | prompt template lookup |
+| `prompt.section.system.tokens`, `.user.tokens`, `.history.tokens`, `.tools.tokens` | per-section breakdown |
+| `prompt.total_tokens`, `.token_budget` | total vs budget |
+| `prompt.truncated` | boolean — whether history was truncated to fit the budget |
+| `prompt.content.markdown` | the full assembled prompt (subject to truncation) |
+
+## Typed events
+
+The pack publishes event schemas under `event.domain = "ai_agent"`. Minimum set (full schema will live in `_meta/events/ai_agent.yaml` in v1.1; v1.0 bindings ship the per-event attribute lists inline):
+
+| `event.name` | When emitted | Required attributes |
+|---|---|---|
+| `ai_agent.context.assembled` | the prompt is ready to send | `prompt.total_tokens`, `prompt.token_budget` |
+| `ai_agent.llm.request` | before an LLM call | `gen_ai.system`, `gen_ai.request.model`, `gen_ai.operation.name` |
+| `ai_agent.llm.response` | after an LLM response | `gen_ai.response.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reasons` |
+| `ai_agent.llm.retry` | retry attempt | `gen_ai.request.model`, `retry.attempt`, `retry.reason`, `retry.backoff_ms` |
+| `ai_agent.tool.called` | tool dispatch | `gen_ai.tool.name`, `gen_ai.tool.call.id` |
+| `ai_agent.tool.returned` | tool response | `gen_ai.tool.name`, `operation.duration_ms`, `operation.status` |
+| `ai_agent.retrieval.requested`, `.completed` | RAG search boundary | `rag.retrieval.top_k`, `rag.retrieval.min_score` |
+| `ai_agent.iteration.started`, `.completed` | agent-loop boundary | `agent.iteration`, `agent.pipeline`, `agent.role` |
+| `ai_agent.decision` | pipeline state change | `agent.decision`, `agent.decision.rationale` |
+| `ai_agent.session.started`, `.completed` | session lifecycle | `session.id`; on completed: usage sums and max iteration |
+
+## Correlation ids
+
+Three correlation keys flow through W3C Baggage so every record in a single user interaction is groupable:
+
+- `session.id` — a long-lived user session.
+- `conversation.id` — one back-and-forth exchange in the session.
+- `agent.run.id` — one execution of the agent loop within the conversation.
+
+The intuitive containment is `session.id ⊃ conversation.id ⊃ agent.run.id`, but the spec does not mandate the hierarchy — it is a recommendation, and a flat key set is acceptable.
+
+## Body truncation and privacy
+
+Prompts and LLM responses easily exceed 100 KB. The pack defaults to:
+
+- `max_body_bytes: 4096` — fields matching `*.content`, `*.markdown`, `*.code`, `*.table_json`, `*.html` are truncated, with `*_truncated: true` and `*_original_bytes: <N>` set.
+- `capture_bodies: false` — production default. The matched fields are replaced with `""` or `null`; only metadata attributes survive (`gen_ai.usage.*`, `*_original_bytes`, `*_hash`).
+- `hash_bodies: true` — `*.content.hash = sha256(content)[:8]` allows dedup and correlation across runs without storing plaintext. An optional `body_hash_salt` env var addresses environments where a hash leak is itself a risk.
+
+Enable `capture_bodies: true` only in an explicit debug mode (for example, via `DAGSTACK_DEBUG_AI=true` or per-request via a scoped logger override — see [Scoped overrides](./scoped-overrides)).
+
+## Recommended span structure
+
+The pack recommends an OTel span hierarchy that pairs naturally with the events:
+
+```
+span: ai_agent.session (root)
+  └─ span: ai_agent.run (single user query)
+      └─ span: ai_agent.iteration.1
+          ├─ span: ai_agent.context.assembly
+          ├─ span: gen_ai.chat (LLM call — OTel GenAI)
+          │   events:  ai_agent.llm.request → ai_agent.llm.response
+          ├─ span: mcp.tools/call (tool dispatch — OTel MCP)
+          │   events:  ai_agent.tool.called → ai_agent.tool.returned
+          └─ span: mcp.tools/call (read_file)
+      └─ span: ai_agent.iteration.2 …
+```
+
+Trace-to-log correlation is automatic — every record carries `trace_id` / `span_id` per [Context propagation](./context).
+
+## See also
+
+- [Operations and typed events](./operations) — the core convention the AI pack builds on.
+- [Redaction](./redaction) — how prompt content interacts with the suffix-based mask list.
+- [ADR-0001 §5.5 (full normative text)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#55-ai-agent-conventions-optional-extension-pack).

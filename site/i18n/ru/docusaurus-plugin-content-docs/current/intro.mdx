@@ -1,0 +1,293 @@
+---
+sidebar_position: 1
+title: Быстрый старт
+description: Установи dagstack/logger и отправь первый структурированный LogRecord — уровень, приёмники, атрибуты, автоматический проброс контекста в Python, TypeScript, Go.
+slug: /intro
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Быстрый старт
+
+`dagstack/logger` — это OpenTelemetry-совместимый контракт структурированного логирования для экосистемы dagstack. Он стандартизирует:
+
+- **Формат передачи** — LogRecord, совместимый с OTel Log Data Model v1.24.
+- **Уровни** — числовой диапазон 1–24 с шестью каноническими текстовыми значениями (`TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`).
+- **Приёмники** — подключаемые получатели записей с единым протоколом Sink (Phase 1 включает `ConsoleSink`, `FileSink`, `InMemorySink`).
+- **Проброс контекста** — `trace_id`, `span_id` и записи W3C Baggage автоматически добавляются в каждую запись.
+- **Маскирование** — значения атрибутов с ключами, оканчивающимися на `_key`, `_secret`, `_token`, `_password`, `_passphrase` или `_credentials`, скрываются на этапе отправки записи.
+- **Локальные переопределения** — отдельный запуск агента, тест или audit-эндпоинт может подменить приёмники на время выполнения блока.
+- **Наблюдаемость AI-агентов** — опциональный набор соглашений с conformance к OTel GenAI для LLM, инструментов и поискового извлечения (retrieval).
+
+:::info Статус релиза
+Все три биндинга поставляют Phase 1 v0.1.x: `dagstack-logger` на PyPI, `@dagstack/logger` на npmjs.org и `go.dagstack.dev/logger` (vanity URL, за которым стоит `github.com/dagstack/logger-go`).
+:::
+
+## Установка
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```bash
+    pip install dagstack-logger
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```bash
+    npm install @dagstack/logger
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```bash
+    go get go.dagstack.dev/logger
+    ```
+  </TabItem>
+</Tabs>
+
+## Первая запись лога
+
+Один раз инициализируй глобальный логгер при старте приложения; дальше из любого места кода вызывай `Logger.get(name)`:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import Logger, ConsoleSink, configure
+
+    configure(
+        root_level="INFO",
+        sinks=[ConsoleSink(mode="auto")],
+        resource_attributes={"service.name": "order-service"},
+    )
+
+    logger = Logger.get("order_service.api", version="1.0.0")
+    logger.info("request received", attributes={"request.id": "req-abc", "user.id": 42})
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { Logger, ConsoleSink, configure } from "@dagstack/logger";
+
+    configure({
+        rootLevel: "INFO",
+        sinks: [new ConsoleSink({ mode: "auto" })],
+        resourceAttributes: { "service.name": "order-service" },
+    });
+
+    const logger = Logger.get("order_service.api", "1.0.0");
+    logger.info("request received", { "request.id": "req-abc", "user.id": 42 });
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    import (
+        "go.dagstack.dev/logger"
+    )
+
+    logger.Configure(
+        logger.WithRootLevel("INFO"),
+        logger.WithSinks(logger.NewConsoleSink(logger.ConsoleAuto, nil, 1)),
+        logger.WithResourceAttributes(logger.Attrs{"service.name": "order-service"}),
+    )
+
+    log := logger.GetVersioned("order_service.api", "1.0.0")
+    log.Info("request received", logger.Attrs{"request.id": "req-abc", "user.id": 42})
+    ```
+  </TabItem>
+</Tabs>
+
+`ConsoleSink(mode="auto")` выбирает цветной читаемый вывод, если stderr — это TTY, и JSON-lines в остальных случаях (так что захват stdout в контейнере, `jq` и `fluent-bit` видят структурированные записи, а терминал разработчика остаётся читаемым для глаз).
+
+## Добавление приёмников
+
+Вызов `configure()` принимает список приёмников. В Phase 1 включены три:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import ConsoleSink, FileSink, InMemorySink, configure
+
+    configure(
+        root_level="INFO",
+        sinks=[
+            ConsoleSink(mode="json"),
+            FileSink("/var/log/order-service.jsonl", max_bytes=100_000_000, keep=10),
+        ],
+        resource_attributes={
+            "service.name": "order-service",
+            "service.version": "1.0.0",
+            "deployment.environment": "production",
+        },
+    )
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { ConsoleSink, FileSink, InMemorySink, configure } from "@dagstack/logger";
+
+    configure({
+        rootLevel: "INFO",
+        sinks: [
+            new ConsoleSink({ mode: "json" }),
+            new FileSink("/var/log/order-service.jsonl", { maxBytes: 100_000_000, keep: 10 }),
+        ],
+        resourceAttributes: {
+            "service.name": "order-service",
+            "service.version": "1.0.0",
+            "deployment.environment": "production",
+        },
+    });
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    fileSink, err := logger.NewFileSink("/var/log/order-service.jsonl", 100_000_000, 10, 1)
+    if err != nil {
+        // handle file open error
+    }
+
+    logger.Configure(
+        logger.WithRootLevel("INFO"),
+        logger.WithSinks(
+            logger.NewConsoleSink(logger.ConsoleJSON, nil, 1),
+            fileSink,
+        ),
+        logger.WithResourceAttributes(logger.Attrs{
+            "service.name":           "order-service",
+            "service.version":        "1.0.0",
+            "deployment.environment": "production",
+        }),
+    )
+    ```
+  </TabItem>
+</Tabs>
+
+`FileSink` пишет Canonical JSON-lines и ротирует записи по размеру файла; `InMemorySink` — это кольцевой буфер для тестов. Каждый приёмник применяет собственный фильтр `min_severity` независимо от остальных (см. [Приёмники](./concepts/sinks)).
+
+## Логирование исключений
+
+Используй метод `exception`, чтобы зафиксировать активную ошибку с атрибутами OTel `exception.*`:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    try:
+        process_order(order_id)
+    except OrderValidationError as err:
+        logger.exception(err, attributes={"order.id": order_id})
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    try {
+        await processOrder(orderId);
+    } catch (err) {
+        logger.exception(err, { attributes: { "order.id": orderId } });
+    }
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    if err := processOrder(ctx, orderID); err != nil {
+        log.ExceptionCtx(ctx, err, nil, logger.Attrs{"order.id": orderID})
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+Запись отправляется на уровне `ERROR`. Атрибуты `exception.type`, `exception.message`, `exception.stacktrace` заполняются автоматически — по семантическим соглашениям OTel `exception.*`.
+
+## Захват логов в тестах
+
+Используй `InMemorySink` плюс локальное переопределение, чтобы захватить только записи, отправленные внутри блока:
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import InMemorySink, Logger
+
+    sink = InMemorySink(capacity=100)
+    logger = Logger.get("test_module")
+
+    with logger.scope_sinks([sink]):
+        run_business_logic()
+
+    records = sink.records()
+    assert any(r.body == "operation completed" for r in records)
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { InMemorySink, Logger } from "@dagstack/logger";
+
+    const sink = new InMemorySink({ capacity: 100 });
+    const logger = Logger.get("test_module");
+
+    await logger.scopeSinks([sink], async (scoped) => {
+        await runBusinessLogic();
+    });
+
+    const records = sink.records();
+    if (!records.some((r) => r.body === "operation completed")) {
+        throw new Error("ожидаемая запись не захвачена");
+    }
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    sink := logger.NewInMemorySink(100, 1)
+    log := logger.Get("test_module")
+
+    err := log.ScopeSinks(ctx, []logger.Sink{sink}, func(ctx context.Context) error {
+        runBusinessLogic(ctx)
+        return nil
+    })
+    if err != nil {
+        // обработать
+    }
+
+    records := sink.Records()
+    // проверить, что какая-либо запись имеет Body == "operation completed"
+    ```
+  </TabItem>
+</Tabs>
+
+Переопределение действует только на отправки через scoped-логгер и его потомков; глобальный `Logger.get(name)` продолжает писать в свои настроенные приёмники. Полный набор проверок смотри в руководстве [Тестирование](./guides/testing).
+
+## Каким приложениям подходит
+
+dagstack/logger не зависит от домена. Он одинаково хорошо подходит для:
+
+- **Web- и API-сервисов** — логирование запросов, события задержек, отслеживание ошибок.
+- **Конвейеров обработки данных** — жизненный цикл задач, прогресс пакетов, метрики пропускной способности.
+- **Оркестраторов рабочих процессов** — иерархия операций, события повторов, аудит запусков.
+- **AI- и RAG-платформ** — трассировка LLM-вызовов, диспетчеризация инструментов, учёт токенов (см. [набор расширений для AI-агентов](./concepts/ai-agents)).
+- **Систем уведомлений** — попытки доставки, ответы провайдеров, обработка dead-letter.
+- **Биллинговых и платёжных сервисов** — события транзакций, маскирование данных карт, журнал аудита.
+
+Механика везде одинакова: задай имя логгера для модуля, один раз настрой приёмники, отправляй структурированные записи и позволь пробросу контекста связать их с трассировками.
+
+## Что читать дальше
+
+**Концепции** — модель, лежащая в основе логгера:
+
+- [Уровни](./concepts/severity), [Приёмники](./concepts/sinks), [Проброс контекста](./concepts/context).
+- [Операции и типизированные события](./concepts/operations), [Маскирование](./concepts/redaction), [Локальные переопределения](./concepts/scoped-overrides).
+- [Форматы передачи](./concepts/wire-formats), [Наблюдаемость AI-агентов](./concepts/ai-agents).
+
+**Руководства** — как решать типовые задачи:
+
+- [Настройка логгера](./guides/configure), [Тестирование](./guides/testing), [Реализация собственного приёмника](./guides/custom-sink).
+
+**Справочник** — точные таблицы:
+
+- [Поля LogRecord](./reference/log-record), [Таблица уровней](./reference/severity-table), [Ошибки](./reference/errors).
+
+**Спецификация** — нормативные решения:
+
+- [Обзор](./spec/overview), [ADR-0001: контракт логгера](./spec/adr/0001-logger-contract).
+
+**Справочник API**:
+
+- [Python](./api/python) — собран по исходникам пакета `dagstack-logger`.
+- [TypeScript](./api/typescript) — собран по исходникам пакета `@dagstack/logger`.
+- [Go](./api/go) — собран по исходникам пакета `go.dagstack.dev/logger`.

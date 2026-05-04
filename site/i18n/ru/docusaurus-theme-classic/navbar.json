@@ -1,0 +1,14 @@
+{
+  "title": {
+    "message": "logger",
+    "description": "The title in the navbar"
+  },
+  "item.label.Documentation": {
+    "message": "Документация",
+    "description": "Navbar item with label Documentation"
+  },
+  "item.label.Specification": {
+    "message": "Спецификация",
+    "description": "Navbar item with label Specification"
+  }
+}

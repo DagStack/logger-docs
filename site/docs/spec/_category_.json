@@ -1,0 +1,11 @@
+{
+  "label": "Specification",
+  "position": 5,
+  "collapsible": true,
+  "collapsed": true,
+  "link": {
+    "type": "generated-index",
+    "title": "Specification",
+    "description": "Normative architectural decisions for the logger contract. A summary plus links to the full normative ADRs in the spec repository."
+  }
+}

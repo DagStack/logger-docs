@@ -1,0 +1,25 @@
+# Node / npm
+node_modules/
+*.log
+npm-debug.log*
+
+# Docusaurus
+.docusaurus/
+build/
+
+# TypeScript
+*.tsbuildinfo
+
+# Editor
+.vscode-test
+.idea/
+
+# OS
+.DS_Store
+
+# Environment
+.env
+.env.local
+
+# Local-only scrub patterns (see CONTRIBUTING.md)
+.scrub-patterns

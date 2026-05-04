@@ -1,0 +1,89 @@
+---
+sidebar_position: 7
+title: Wire formats
+description: Three wire formats — OTLP protobuf, OTLP JSON, dagstack JSON-lines — share the same internal LogRecord. Encoding rules for timestamps, trace ids, and key casing.
+slug: /concepts/wire-formats
+---
+
+# Wire formats
+
+The internal `LogRecord` shape is identical across every binding. What differs is the **wire encoding** — how the record is serialised onto the byte stream that reaches a sink. The spec defines three wire formats; sinks pick one (or several) per their declared output.
+
+## The three formats
+
+| Format | Used by | Casing | Timestamps | trace_id / span_id |
+|---|---|---|---|---|
+| **OTLP protobuf** | `OTLPSink` (gRPC, HTTP/protobuf) | (binary) | `fixed64` | `bytes(16)` / `bytes(8)` |
+| **OTel JSON** | `OTLPSink` (HTTP/JSON), `FileSink` OTLP mode, `ConsoleSink` JSON mode | camelCase | string-decimal nanoseconds | lowercase 32-hex / 16-hex |
+| **dagstack JSON-lines** | `FileSink` default mode, `ConsoleSink` wire mode | snake_case | int64 nanoseconds | lowercase 32-hex / 16-hex |
+
+The OTel formats are required for cross-vendor interoperability with observability backends; dagstack JSON-lines is a snake_case variant aligned with the [config-spec Canonical JSON](https://config.dagstack.dev/docs/concepts/sources) conventions, used by sinks that target dagstack-internal log pipelines.
+
+## OTLP protobuf
+
+The native OTel wire — the same bytes the OTel SDK speaks to an OTel Collector. Used by the planned `OTLPSink` (Phase 2). Field names match the proto schema:
+
+- `time_unix_nano`, `observed_time_unix_nano` are `fixed64`.
+- `trace_id` is `bytes` (16 bytes, exactly).
+- `span_id` is `bytes` (8 bytes, exactly).
+- `severity_number` is the int range `1..24`.
+- `body` and `attributes` use the OTel `AnyValue` recursive sum type.
+
+Serialisation is delegated to the protobuf runtime in each language (`google.protobuf` in Python, `protobufjs` in TS, `google.golang.org/protobuf` in Go). The format is binary and not human-readable; rely on the OTel Collector's `logging` exporter or `otlp-debug-exporter` to inspect it.
+
+## OTel JSON
+
+The OTel-recommended JSON encoding (per the protobuf JSON spec for 64-bit integers). Used by `OTLPSink` over HTTP+JSON, `FileSink` OTLP mode, and `ConsoleSink` JSON mode.
+
+Key encoding rules:
+
+- **camelCase** keys: `timeUnixNano`, `observedTimeUnixNano`, `severityNumber`, `severityText`, `traceId`, `spanId`, `traceFlags`.
+- **Timestamps as decimal strings.** A `fixed64` value larger than `2^53` cannot be represented as a JSON number without precision loss, so OTel JSON wraps it in a string: `"timeUnixNano": "1729800000000000000"`.
+- **`trace_id` / `span_id` as lowercase hex strings.** 32 hex characters for `trace_id` (zero-padded), 16 for `span_id`.
+- **Body and attributes** use the OTel JSON `AnyValue` shape — `{"stringValue": "..."}`, `{"intValue": 42}`, `{"kvlistValue": {"values": [{"key": ..., "value": ...}, ...]}}`.
+
+Backends like OpenTelemetry Collector, Honeycomb, and Datadog parse OTel JSON natively.
+
+## dagstack JSON-lines
+
+A snake_case variant for sinks targeting dagstack-internal pipelines and tooling. The format is **Canonical JSON** (sorted keys recursively, UTF-8, LF, no trailing newline) — bit-for-bit identical between bindings, suitable for hashing and deterministic comparison.
+
+Differences from OTel JSON:
+
+- **snake_case** keys: `time_unix_nano`, `observed_time_unix_nano`, `severity_number`, `severity_text`, `trace_id`, `span_id`, `trace_flags`.
+- **Timestamps as integers.** Canonical JSON allows int64 as a native number; consumers must handle bigints when reading the wire format (so 64-bit nano values do not lose precision in JavaScript).
+- **`trace_id` / `span_id` as lowercase hex strings** (same as OTel JSON).
+- **Body and attributes** use the natural JSON encoding for `Value` — strings, numbers, booleans, null, arrays, objects. No `AnyValue` wrapping.
+
+Example record:
+
+```json
+{"attributes":{"order.id":1234,"request.id":"req-abc"},"body":"order placed","instrumentation_scope":{"name":"order_service.checkout","version":"1.0.0"},"resource":{"attributes":{"service.name":"order-service"}},"severity_number":9,"severity_text":"INFO","span_id":"00f067aa0ba902b7","time_unix_nano":1729800000000000000,"trace_flags":1,"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736"}
+```
+
+The Python `FileSink` default mode emits exactly this format, one record per line, no trailing newline at end of file.
+
+## Human-pretty (presentation only)
+
+`ConsoleSink(mode="pretty")` produces colourised text for an interactive TTY — timestamp, severity tag, scope name, body, attribute summary. It is **not a wire format**; a parser is not required to reconstruct the LogRecord from pretty output. The pretty mode is for developer eyes only; CI logs, container stdout, and file sinks always use a parseable format.
+
+## `observed_time_unix_nano` ownership
+
+The producer (the binding's emit path) leaves `observed_time_unix_nano = null`. The sink **fills** the field at ingestion when it is null, just before serialisation. This guarantees that file and OTLP wire output always carries an observed timestamp; in an in-memory pipeline (`InMemorySink`) both timestamps may coincide.
+
+## Validation
+
+The conformance suite (spec §14.1) tests every wire format with an emit → parse → re-emit roundtrip:
+
+1. Build a representative LogRecord (one per severity, one per primary `event.domain`, one with redaction applied, one with full context).
+2. Serialise to the wire format under test.
+3. Parse the bytes back into a LogRecord.
+4. Re-serialise and compare byte-for-byte against the first emit.
+
+Canonical JSON rules apply for the dagstack JSON-lines format. A non-conformant input (unknown `severity_number`, missing `instrumentation_scope`, malformed `trace_id`) is rejected on parse.
+
+## See also
+
+- [LogRecord fields](../reference/log-record) — full field list with types.
+- [Sinks](./sinks) — which sinks emit which formats.
+- [ADR-0001 §1 (full normative text)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#1-log-data-model-wire-format).

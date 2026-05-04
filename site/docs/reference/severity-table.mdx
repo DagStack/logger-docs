@@ -1,0 +1,80 @@
+---
+sidebar_position: 2
+title: Severity reference table
+description: Full 24-row enumeration of severity_number values, the canonical severity_text bucket, and the mapping to syslog, Python logging, and Go slog.
+slug: /reference/severity-table
+---
+
+# Severity reference table
+
+The full 1-24 severity number range mapped to the six canonical `severity_text` buckets, plus the mapping to common host logger systems (syslog, Python `logging`, Go `slog`).
+
+## Numeric enumeration
+
+| `severity_number` | `severity_text` | Primary alias | Syslog (RFC 5424) | Python `logging` | Go `slog` |
+|---|---|---|---|---|---|
+| 1 | `TRACE` | `TRACE` (alias `TRACE1`) | 7 (debug) | — | — |
+| 2 | `TRACE` | `TRACE2` | 7 | — | — |
+| 3 | `TRACE` | `TRACE3` | 7 | — | — |
+| 4 | `TRACE` | `TRACE4` | 7 | — | — |
+| 5 | `DEBUG` | `DEBUG` (alias `DEBUG1`) | 7 | 10 | -4 |
+| 6 | `DEBUG` | `DEBUG2` | 7 | 10 | -3 |
+| 7 | `DEBUG` | `DEBUG3` | 7 | 10 | -2 |
+| 8 | `DEBUG` | `DEBUG4` | 7 | 10 | -1 |
+| 9 | `INFO` | `INFO` (alias `INFO1`, primary) | 6 (info) | 20 | 0 |
+| 10 | `INFO` | `INFO2` | 6 | 20 | 1 |
+| 11 | `INFO` | `INFO3` | 6 | 20 | 2 |
+| 12 | `INFO` | `INFO4` | 6 | 20 | 3 |
+| 13 | `WARN` | `WARN` (alias `WARN1`) | 4 (warning) | 30 | 4 |
+| 14 | `WARN` | `WARN2` | 4 | 30 | 5 |
+| 15 | `WARN` | `WARN3` | 4 | 30 | 6 |
+| 16 | `WARN` | `WARN4` | 4 | 30 | 7 |
+| 17 | `ERROR` | `ERROR` (alias `ERROR1`) | 3 (err) | 40 | 8 |
+| 18 | `ERROR` | `ERROR2` | 3 | 40 | 9 |
+| 19 | `ERROR` | `ERROR3` | 3 | 40 | 10 |
+| 20 | `ERROR` | `ERROR4` | 3 | 40 | 11 |
+| 21 | `FATAL` | `FATAL` (alias `FATAL1`) | 2 (crit) | 50 | 12 |
+| 22 | `FATAL` | `FATAL2` | 1 (alert) | 50 | 13 |
+| 23 | `FATAL` | `FATAL3` | 0 (emerg) | 50 | 14 |
+| 24 | `FATAL` | `FATAL4` | 0 | 50 | 15 |
+
+The mapping for `Python logging` and `Go slog` is approximate — those systems use coarser granularity. The dagstack-logger preserves the OTel granularity on emit, and the conversion in the table reflects what a sink would record when it forwards to a host logger system.
+
+## Canonical strings
+
+The six values for `severity_text` are fixed:
+
+```
+"TRACE"   "DEBUG"   "INFO"   "WARN"   "ERROR"   "FATAL"
+```
+
+Backends filter by exact match. Adding `"INFO2"` or `"WARN_HIGH"` would break exact-match queries on every observability platform.
+
+## The primary severity methods
+
+Each binding exposes the bucket-baseline values as named methods:
+
+| Method | `severity_number` |
+|---|---|
+| `trace(...)` | 1 |
+| `debug(...)` | 5 |
+| `info(...)` | 9 |
+| `warn(...)` | 13 |
+| `error(...)` | 17 |
+| `fatal(...)` | 21 |
+
+Intermediate values (e.g., `INFO2 = 10` to mark informational events at a higher numeric level than the default) go through the generic method:
+
+```
+logger.log(severity_number=10, body=..., attributes=...)
+```
+
+## Source of truth
+
+The mapping table will live in `_meta/severity.yaml` in the spec repository (planned for v1.1; bindings will then consume it as a vendored copy or via a git submodule and emit per-language constants from it). v1.0 bindings ship the table inline; once the YAML lands a binding that still hard-codes the values is **not** conformant — drift between the spec and the binding surfaces as production divergence.
+
+## See also
+
+- [Severity concept](../concepts/severity) — bucket semantics and rationale.
+- [LogRecord fields](./log-record) — full record layout.
+- [ADR-0001 §2 (full normative text)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#2-severity-levels).

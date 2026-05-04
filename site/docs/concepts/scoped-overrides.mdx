@@ -1,0 +1,178 @@
+---
+sidebar_position: 6
+title: Scoped overrides
+description: Temporarily replace sinks for a single agent run, test, or audit endpoint via with_sinks, append_sinks, and the scope_sinks context manager.
+slug: /concepts/scoped-overrides
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Scoped overrides
+
+A scoped override temporarily replaces (or extends) a logger's sinks for a limited execution scope. It exists for three primary use cases: capturing logs in tests, writing per-run audit trails, and enabling debug capture for a single endpoint without touching the global configuration.
+
+## Three operations
+
+The spec (§6.1) defines three operations on an existing logger:
+
+| Operation | Effect |
+|---|---|
+| `with_sinks([...])` | Returns a child logger whose sinks **replace** the parent's. |
+| `append_sinks([...])` | Returns a child logger whose sinks are the parent's **plus** the supplied extras. |
+| `without_sinks()` | Returns a child logger with **no** sinks — emits are discarded. |
+
+Each operation returns a child logger; the parent's configuration is untouched. The returned logger is non-cached — calling `Logger.get(name)` from elsewhere keeps returning the original instance with its global sinks.
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import Logger, InMemorySink, FileSink
+
+    logger = Logger.get("order_service")
+
+    # Replace sinks — only InMemorySink receives emits.
+    test_logger = logger.with_sinks([InMemorySink(capacity=100)])
+    test_logger.info("captured here")
+
+    # Append a sink — both the parent's and the extra receive emits.
+    audit_logger = logger.append_sinks([FileSink("/var/log/audit.jsonl")])
+    audit_logger.info("audit event")
+
+    # Discard — emits go to /dev/null.
+    silent_logger = logger.without_sinks()
+    silent_logger.info("never seen")
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { Logger, InMemorySink, FileSink } from "@dagstack/logger";
+
+    const logger = Logger.get("order_service");
+
+    // Replace sinks — only InMemorySink receives emits.
+    const testLogger = logger.withSinks([new InMemorySink({ capacity: 100 })]);
+    testLogger.info("captured here");
+
+    // Append a sink — both the parent's and the extra receive emits.
+    const auditLogger = logger.appendSinks([new FileSink("/var/log/audit.jsonl")]);
+    auditLogger.info("audit event");
+
+    // Discard — emits go to /dev/null.
+    const silentLogger = logger.withoutSinks();
+    silentLogger.info("never seen");
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    log := logger.Get("order_service")
+
+    // Replace sinks — only InMemorySink receives emits.
+    testLog := log.WithSinks(logger.NewInMemorySink(100, 1))
+    testLog.Info("captured here", nil)
+
+    // Append a sink — both the parent's and the extra receive emits.
+    fileSink, _ := logger.NewFileSink("/var/log/audit.jsonl", 0, 0, 1)
+    auditLog := log.AppendSinks(fileSink)
+    auditLog.Info("audit event", nil)
+
+    // Discard — emits go to /dev/null.
+    silentLog := log.WithoutSinks()
+    silentLog.Info("never seen", nil)
+    ```
+  </TabItem>
+</Tabs>
+
+## Lexically bounded scope
+
+For a block-scoped capture (test case, request handler, defer pattern), the spec defines `scope_sinks` — a context manager that swaps sinks **on the original logger** for the duration of the block, then restores the previous sinks on exit.
+
+The key difference from `with_sinks`: `scope_sinks` modifies `self`, so any code reaching the same logger via `Logger.get(name)` during the scope writes to the swapped sinks. Useful when business logic resolves loggers by name internally and you cannot pass an alternate logger down.
+
+<Tabs groupId="lang" queryString="lang">
+  <TabItem value="python" label="Python">
+    ```python
+    from dagstack.logger import Logger, InMemorySink
+
+    logger = Logger.get("order_service")
+    sink = InMemorySink(capacity=100)
+
+    with logger.scope_sinks([sink]):
+        run_business_logic()              # emits via Logger.get("order_service") land in sink
+        # other modules calling Logger.get("order_service") inside this block
+        # also emit into sink
+
+    # Outside the block, emits go to the global sinks again.
+    assert len(sink.records()) > 0
+    ```
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+    ```typescript
+    import { Logger, InMemorySink } from "@dagstack/logger";
+
+    const logger = Logger.get("order_service");
+    const sink = new InMemorySink({ capacity: 100 });
+
+    await logger.scopeSinks([sink], async (scoped) => {
+        await runBusinessLogic();
+        // emits via Logger.get("order_service") in this callback land in sink;
+        // other modules calling Logger.get("order_service") inside also emit
+        // into sink for the duration of the callback.
+    });
+
+    // Outside the callback, emits go to the global sinks again.
+    if (sink.records().length === 0) throw new Error("nothing captured");
+    ```
+  </TabItem>
+  <TabItem value="go" label="Go">
+    ```go
+    log := logger.Get("order_service")
+    sink := logger.NewInMemorySink(100, 1)
+
+    err := log.ScopeSinks(ctx, []logger.Sink{sink}, func(ctx context.Context) error {
+        runBusinessLogic(ctx)
+        // emits via logger.Get("order_service") in this callback land in sink;
+        // other modules calling logger.Get("order_service") inside also emit
+        // into sink for the duration of the callback.
+        return nil
+    })
+    if err != nil {
+        // handle
+    }
+
+    // Outside the callback, emits go to the global sinks again.
+    records := sink.Records()
+    _ = records
+    ```
+  </TabItem>
+</Tabs>
+
+## Use cases
+
+### Tests — InMemorySink for assertions
+
+The most common scoped-override pattern: capture records during a test, then assert against them. See the [Testing guide](../guides/testing) for a full walkthrough.
+
+### Per-run audit
+
+A workflow orchestrator can create a scoped logger per run that writes both to the global OTLP exporter (for cross-run aggregation) and to a dedicated file sink (for per-run audit). On run finalize, the file is closed and archived alongside the run's metadata.
+
+### Per-hook redaction
+
+A plugin hook handles a sensitive payload — say, a webhook from a payment provider. A scoped logger wraps the hook with an augmented `RedactionProcessor` (Phase 2) that masks additional fields specific to the provider's schema, without affecting the rest of the application.
+
+### Debug session
+
+`capture_bodies: true` can be enabled for a single request via a debug header plus an ACL check. The middleware constructs a scoped logger with the debug flag for the duration of that request; other concurrent requests stay in privacy mode.
+
+## Anti-patterns
+
+- **Long-lived scoped loggers.** A scoped override outliving its operation boundary is a sign you actually want a dedicated named logger (`Logger.get(name)`) with its own configuration. Scope = ephemeral.
+- **Scope leaks across async boundaries.** A binding guarantees scope isolation only inside the lexical block. If you spawn an async task inside a `scope_sinks` block and let it complete after the block exits, its emits land in the wrong sinks (or crash on a closed sink). Use `await` / `defer` / context-manager-aware scheduling.
+- **Mutating sinks inside a scope.** The scope captures references to sink objects, not deep copies. Calling `sink.close()` on a captured sink invalidates it for any later code that holds the same reference.
+
+## See also
+
+- [Testing](../guides/testing) — InMemorySink usage patterns.
+- [Sinks](./sinks) — the Sink contract that scoped overrides operate on.
+- [ADR-0001 §6 (full normative text)](https://github.com/dagstack/logger-spec/blob/main/adr/0001-logger-contract.md#6-scoped-logger-overrides).
